@@ -1,0 +1,19 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# venv
+.venv/
+
+# dotenv
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# System
+.DS_Store

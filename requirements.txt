@@ -1,0 +1,7 @@
+motor
+python-dotenv
+loguru
+rich
+APScheduler
+schedule
+pydantic
