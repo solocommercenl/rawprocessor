@@ -94,22 +94,3 @@ async def get_site_settings(site_url: str, use_cache: bool = True) -> Dict[str, 
     if use_cache:
         _site_settings_cache[site_url] = settings
     return settings
-
-# Test stub
-async def _test():
-    """
-    Test stub for site_settings.py.
-    Set up a test document for 'solostaging.nl' and validate retrieval/fields.
-    """
-    import asyncio
-    try:
-        settings = await get_site_settings("solostaging.nl", use_cache=False)
-        assert isinstance(settings, dict)
-        assert all(f in settings for f in REQUIRED_FIELDS)
-        logger.success("site_settings.py test passed.")
-    except Exception as e:
-        logger.exception(f"site_settings.py test failed: {e}")
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(_test())
