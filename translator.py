@@ -36,20 +36,20 @@ class Translator:
         # Meta fields to translate
         raw_fields = [
             ("Fueltype", "im_fuel_type", "fuel_type"),
-            ("Gearbox", "im_gearbox", "gearbox"),  # Map Gearbox correctly to im_gearbox
-            ("Body", "im_body_type", "body_type"),  # Map Body correctly to im_body_type
-            ("Upholstery", "im_upholstery", "upholstery"),  # Map Upholstery correctly
-            ("Colour", "color", "color")  # Map Colour correctly to color
+            ("Gearbox", "im_gearbox", "gearbox"),  # Ensure mapping for Gearbox
+            ("Body", "im_body_type", "body_type"),  # Ensure mapping for Body
+            ("Upholstery", "im_upholstery", "upholstery"),  # Ensure mapping for Upholstery
+            ("Colour", "color", "color")  # Ensure correct mapping for Colour to color
         ]
 
         # Process each raw field and translate it
         for raw_field, im_field, trans_key in raw_fields:
             val = raw.get(raw_field)
             if val is None:
+                logger.warning(f"[TRANSLATION] Field '{raw_field}' missing in raw data. Skipping translation.")
                 continue  # Skip if the field is missing in raw data
             translated_val = await self._translate_value(val, trans_key, translation_map, site, im_field, record_id)
-            # Always include the translated value or raw value if translation is missing
-            output[im_field] = translated_val
+            output[im_field] = translated_val  # Add translated or raw value
 
         # Options fields from nested "Equipment" dict
         options_map = {
@@ -68,7 +68,7 @@ class Translator:
             mapped_options = []
             for opt in raw_opts if isinstance(raw_opts, list) else [raw_opts]:
                 translated_val = await self._translate_value(opt, "options", translation_map, site, im_field, record_id)
-                mapped_options.append(translated_val)  # Always add the translated or raw value
+                mapped_options.append(translated_val)
             if mapped_options:
                 output[im_field] = mapped_options
 
@@ -101,6 +101,9 @@ class Translator:
         val = str(raw_value).strip()  # Ensure any leading/trailing spaces are removed
         result = None
         mapping = translation_map.get(trans_key, {})
+
+        # Log the raw value before translation (for debugging)
+        logger.debug(f"[TRANSLATION] Attempting to translate field '{field}' with raw value: '{val}'")
 
         # Get the translated value if available
         result = mapping.get(val)
