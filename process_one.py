@@ -1,8 +1,7 @@
-# process_one.py
-
 import asyncio
 import os
 import json
+import logging
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from site_settings import SiteSettings
@@ -11,12 +10,23 @@ from translator import Translator
 from calculator import Calculator
 from processor import Processor
 
+# Setup environment variables and logging
 load_dotenv()
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("MONGO_DB", "autodex")
 
 RAW_ID = ""   # Optionally set a MongoDB ObjectId string here
 SITE = "solostaging"  # <- site key from your site_settings example
+
+# Check for environment variables
+if not MONGO_URI:
+    raise ValueError("MONGO_URI is not set in the environment variables.")
+if not DB_NAME:
+    raise ValueError("MONGO_DB is not set in the environment variables.")
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def main():
     client = AsyncIOMotorClient(MONGO_URI)
@@ -30,23 +40,23 @@ async def main():
         raw = await db.raw.find_one({})
 
     if not raw:
-        print("No raw record found.")
+        logger.warning("No raw record found.")
         return
 
     settings = await SiteSettings(db).get(SITE)
-    cleaned = clean_raw_record(raw, f"[{SITE}]")
+    cleaned = clean_raw_record(raw, db, f"[{SITE}]")
     if not cleaned:
-        print("Raw record failed cleaner and would be excluded.")
+        logger.warning("Raw record failed cleaner and would be excluded.")
         return
 
     processor = Processor(db, SITE)
     processed = await processor.process(cleaned, settings)
     if not processed:
-        print("Processing returned None. Record would not be imported.")
+        logger.warning("Processing returned None. Record would not be imported.")
         return
 
-    print("Processed output (as would be written to processed_{site}):")
-    print(json.dumps(processed, indent=2, default=str))
+    logger.info("Processed output (as would be written to processed_{site}):")
+    logger.info(json.dumps(processed, indent=2, default=str))
 
 if __name__ == "__main__":
     asyncio.run(main())

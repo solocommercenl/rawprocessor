@@ -1,5 +1,3 @@
-# translator.py
-
 """
 Async translation module for per-field value mapping in vehicle import pipeline.
 Handles translation for all relevant meta fields and options using the correct
@@ -84,14 +82,10 @@ class Translator:
             if mapped_options:
                 output[im_field] = mapped_options
 
-        # Color (tax field, if present in raw)
+        # Color (raw-pass, no translation)
         if "Colour" in raw:
             color_val = raw["Colour"]
-            translated_val = self._translate_value(color_val, "color", translation_map, site, "color", record_id)
-            if translated_val is not None:
-                output["color"] = translated_val
-            else:
-                failed_fields.append(f"color='{color_val}'")
+            output["color"] = color_val  # Pass the color raw, no translation here.
 
         if not output:
             logger.warning(

@@ -91,7 +91,7 @@ class Processor:
         doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
         doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""  # Featured image
         doc["im_price_org"] = round(float(raw.get("price", 0)), 2)  # Derived from price
-        doc["im_registration_year"] = str(raw.get("registration_year", "")) or str(raw.get("im_registration_year", ""))
+        doc["im_registration_year"] = str(raw.get("registration_year", "")) or str(raw.get("im_registration_year", "")) 
         doc["im_first_registration"] = raw.get("registration", "")
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")

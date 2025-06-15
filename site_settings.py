@@ -49,6 +49,7 @@ class SiteSettings:
         cache_key = site_key.lower()
         if use_cache and cache_key in self._cache:
             return self._cache[cache_key]
+        
         # Find on "site_url" field, supporting both exact and regex/substring matching
         doc = await self.db.site_settings.find_one({
             "$or": [
