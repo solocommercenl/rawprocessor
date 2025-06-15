@@ -116,12 +116,17 @@ class Processor:
             else:
                 doc[k] = v
 
-        # Map color as a taxonomy field for JetEngine
+        # Taxonomy field (color)
         doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")
 
-        # Treat make and model as hierarchical taxonomies
-        doc["make"] = raw.get("brand", "")
-        doc["model"] = raw.get("model", "")
+        # Ensure make/model normalization for taxonomy (if needed)
+        doc["make"] = raw.get("brand", "")  # make as taxonomy
+        doc["model"] = raw.get("model", "")  # model as taxonomy
+
+        # Add missing fields from raw
+        doc["im_seats"] = raw.get("seats", 0)  # Example of seat mapping
+        doc["im_body_type"] = raw.get("body_type", "")  # Ensure body type is included
+        doc["im_gearbox"] = raw.get("gearbox", "")  # Add gearbox as required
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
         doc["_is_new"] = not bool(existing)
