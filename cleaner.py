@@ -1,9 +1,10 @@
 from typing import Dict, Any, Optional
+from motor.motor_asyncio import AsyncIOMotorDatabase  # Add this import
 from loguru import logger
 
 async def clean_raw_record(
     record: Dict[str, Any],
-    db: AsyncIOMotorDatabase,  # Add db parameter to delete from MongoDB
+    db: AsyncIOMotorDatabase,  # Now the db parameter is recognized
     log_prefix: str = ""
 ) -> Optional[Dict[str, Any]]:
     """
