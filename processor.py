@@ -72,7 +72,7 @@ class Processor:
     async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
         if self.calculator is None:
             self.calculator = Calculator(self.db, site_settings)
-        # Translate using raw field names; output is processed keys (im_*)
+
         translated = await self.translator.translate_fields(raw, site_settings, raw.get("_id"), self.site)
         if not translated:
             logger.warning(f"[SKIP] {raw.get('_id')} - Translation failed or incomplete")
@@ -81,11 +81,44 @@ class Processor:
         vated = str(raw.get("vatded", "false")).lower() == "true"
         financials = await self.calculator.calculate_financials(raw, vated)
 
-        # Build the processed output dict (only now assign to processed/JetEngine field names)
-        doc = {**translated, **financials, "im_status": True}
-        doc["make"], doc["model"] = normalize_make_model(doc.get("make", ""), doc.get("model", ""))
+        # CPT/JetEngine fields (edit this mapping to match your latest CPT config and KVM example)
+        doc: Dict[str, Any] = {}
+
+        doc["im_ad_id"] = raw.get("car_id", "")
+        doc["make"] = raw.get("brand", "")
+        doc["model"] = raw.get("model", "")
+        doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()
+        doc["im_title"] = raw.get("title", "")
+        doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
+        doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""
+        doc["im_price_org"] = round(float(raw.get("price", 0)), 2)
+        doc["im_registration_year"] = str(raw.get("registration_year", "")) or str(raw.get("im_registration_year", ""))
+        doc["im_first_registration"] = raw.get("registration", "")
+        doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
+        doc["im_power"] = raw.get("power", "")
+        doc["im_colour"] = raw.get("colourandupholstery", {}).get("Colour", "")
+        doc["im_upholstery"] = raw.get("colourandupholstery", {}).get("Upholstery", "")
+        doc["im_manufacturer_color"] = raw.get("colourandupholstery", {}).get("Manufacturercolour", "")
+        doc["im_paint_type"] = raw.get("colourandupholstery", {}).get("Paint", "")
+        doc["im_dealer_company"] = raw.get("dealer_company", "")
+        doc["im_dealer_contact"] = raw.get("dealer_contact", "")
+        doc["im_dealer_phone"] = raw.get("dealer_phone", "")
+        doc["im_dealer_city"] = raw.get("dealer_city", "")
+        doc["im_product_url"] = raw.get("Product_URL", "")
+        doc["im_status"] = True
         doc["updated_at"] = datetime.utcnow()
-        doc["im_ad_id"] = raw.get("im_ad_id") or raw.get("ad_id") or raw.get("_id")
+
+        # Merge in translated and calculated fields (will not overwrite above)
+        doc.update(translated)
+        # Ensure all calculated numeric fields are rounded properly
+        for k, v in financials.items():
+            if isinstance(v, float):
+                doc[k] = round(v, 2)
+            else:
+                doc[k] = v
+
+        # Handle make/model normalization if needed for taxonomy (optional)
+        # doc["make"], doc["model"] = normalize_make_model(doc["make"], doc["model"])
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
         doc["_is_new"] = not bool(existing)

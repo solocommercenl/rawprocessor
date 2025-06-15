@@ -26,11 +26,6 @@ logger = logging.getLogger("rawprocessor.calculator")
 
 class Calculator:
     def __init__(self, db: AsyncIOMotorDatabase, site_settings: dict):
-        """
-        Args:
-            db: Motor AsyncIOMotorDatabase
-            site_settings: Per-site financial constants and margin config from Mongo
-        """
         self.db = db
         self.site_settings = site_settings
 
@@ -39,19 +34,8 @@ class Calculator:
         record: dict,
         vated: bool
     ) -> Dict[str, Any]:
-        """
-        Calculates all financial fields for a vehicle record.
-
-        Args:
-            record: Cleaned, translated vehicle dict (raw or processed)
-            vated: True if VAT-deductible, False if margin
-
-        Returns:
-            Dict of calculated financial fields (see JetEngine CPT config)
-        """
         try:
             # --- Constants from site_settings ---
-            # Use price margin lookup on price (im_price_org or raw price)
             price_for_margin = float(record.get("im_price_org") or record.get("price") or 0)
             margin_pct = self._get_margin_pct(price_for_margin)
             vat_pct = 0.21
@@ -99,7 +83,6 @@ class Calculator:
                 im_nett_price = im_price_org
 
             im_margin_amount = round(im_nett_price * margin_pct, 2) if vated else round(im_price_org * margin_pct, 2)
-
             im_extra_cost_total = round(licence_plate_fee + transport_cost + rdw_inspection, 2)
             im_unforeseen_cost = round(im_nett_price * unforeseen_pct, 2) if vated else round(im_price_org * unforeseen_pct, 2)
 
@@ -118,7 +101,7 @@ class Calculator:
                 registration_date=registration_date,
                 registration_year=registration_year
             )
-            im_bpm_rate = bpm_data.get("bpm_rate", 0.0)
+            im_bpm_rate = round(bpm_data.get("bpm_rate", 0.0), 2)
             im_bpm_exempt = bpm_data.get("bpm_exempt", False)
 
             # --- Step 4: Final price ---
@@ -165,9 +148,6 @@ class Calculator:
             raise
 
     def _get_margin_pct(self, price_org: float) -> float:
-        """
-        Returns the correct margin percentage for a given original price, per site_settings.price_margins.
-        """
         try:
             for band in self.site_settings.get("price_margins", []):
                 if band["max"] is None or price_org <= band["max"]:
@@ -181,9 +161,6 @@ class Calculator:
     def _calculate_monthly_payment(
         price: float, down_payment: float, remaining_debt: float, annual_interest: float, term_months: int
     ) -> float:
-        """
-        Calculates monthly payment using annuity formula, as per legacy code and financial convention.
-        """
         try:
             principal = price - down_payment - remaining_debt
             if principal <= 0 or term_months <= 0:
@@ -202,9 +179,6 @@ class Calculator:
         registration_date: Optional[str],
         registration_year: Optional[int]
     ) -> Dict[str, Any]:
-        """
-        Legacy BPM logic, 100% Mongo-driven, supporting all edge-cases.
-        """
         try:
             if fuel_type in ("electric", "elektrisch"):
                 return {"bpm_rate": 0.0, "bpm_exempt": True}
