@@ -81,7 +81,7 @@ class Processor:
         vated = str(raw.get("vatded", "false")).lower() == "true"
         financials = await self.calculator.calculate_financials(raw, vated)
 
-        # CPT/JetEngine fields (edit this mapping to match your latest CPT config and KVM example)
+        # Explicit field mapping to JetEngine/processed fields
         doc: Dict[str, Any] = {}
 
         doc["im_ad_id"] = raw.get("car_id", "")
@@ -108,16 +108,18 @@ class Processor:
         doc["im_status"] = True
         doc["updated_at"] = datetime.utcnow()
 
-        # Merge in translated and calculated fields (will not overwrite above)
+        # Add translated and calculated fields
         doc.update(translated)
-        # Ensure all calculated numeric fields are rounded properly
         for k, v in financials.items():
             if isinstance(v, float):
-                doc[k] = round(v, 2)
+                doc[k] = int(round(v, 0))  # round all financial fields to integers
             else:
                 doc[k] = v
 
-        # Handle make/model normalization if needed for taxonomy (optional)
+        # Add color as tax field
+        doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")
+
+        # Ensure make/model normalization for taxonomy (if needed)
         # doc["make"], doc["model"] = normalize_make_model(doc["make"], doc["model"])
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
