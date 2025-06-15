@@ -37,7 +37,7 @@ async def clean_raw_record(
 
     # Check if raw_emissions is invalid (0, null, or empty) and Fueltype is not "Electric"
     if emissions_value in [None, 0]:
-        if fuel != "Electric":  # If it's not Electric, delete the record
+        if "Electric" not in fuel:  # If it's not Electric, delete the record
             reasons.append("Invalid raw_emissions value (0, null, or empty)")
 
     # 2. Images count must be >= 4
