@@ -1,16 +1,16 @@
-# jobqueue.py
-
 """
+jobqueue.py
+
 WP sync job queue module for rawprocessor.
 - Async Motor, per-site queueing.
-- Only enqueues jobs (create, update, unpublish, delete) if group hashes differ.
-- Full job schema, retry tracking, robust logging, no silent skips.
-- Never hardcodes sites, actions, or fields.
+- Enqueues jobs (create, update, unpublish, delete) only if needed.
+- Full job schema, retry tracking, logging, no silent skips.
 """
 
 from typing import Any, Dict, List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
+from bson import ObjectId
 
 QUEUE_ACTIONS = {"create", "update", "unpublish", "delete"}
 RETRY_LIMIT_DEFAULT = 3
@@ -33,10 +33,6 @@ class WPQueue:
         meta: Optional[Dict[str, Any]] = None,
         reason: Optional[str] = None,
     ) -> None:
-        """
-        Enqueue a sync job if hashes changed.
-        Logs and raises error if invalid.
-        """
         if action not in QUEUE_ACTIONS:
             logger.error(f"Invalid queue action: {action}")
             raise ValueError(f"Invalid action: {action}")
@@ -54,33 +50,38 @@ class WPQueue:
         }
         try:
             await self.collection.insert_one(job)
-            logger.info(f"Enqueued job: {action} for ad_id={ad_id}, changed_fields={changed_fields}")
+            logger.info(f"Enqueued job: {action} for ad_id={ad_id}, fields={changed_fields}")
         except Exception as e:
-            logger.opt(exception=True).error(f"Failed to enqueue job for ad_id={ad_id}: {str(e)}")
+            logger.opt(exception=True).error(f"Failed to enqueue job for ad_id={ad_id}: {e}")
             raise
 
-    async def mark_failed(self, job_id, error_msg: str):
-        """
-        Mark a job as failed, increment retries.
-        """
+    async def mark_failed(self, job_id: ObjectId, error_msg: str) -> None:
         job = await self.collection.find_one({"_id": job_id})
         if not job:
-            logger.error(f"Job {job_id} not found for fail marking")
+            logger.error(f"Job {job_id} not found for failure marking")
             return
-        retries = job.get("retries", 0) + 1
-        update = {
-            "$set": {
-                "status": "failed",
-                "reason": error_msg,
-                "retries": retries
-            }
-        }
-        await self.collection.update_one({"_id": job_id}, update)
-        if retries >= self.retry_limit:
-            logger.warning(f"Job {job_id} reached retry limit ({self.retry_limit})")
-        else:
-            logger.info(f"Job {job_id} marked failed (retry {retries}/{self.retry_limit}): {error_msg}")
 
-    async def get_pending_jobs(self, limit=50) -> List[Dict[str, Any]]:
+        retries = job.get("retries", 0) + 1
+        if retries >= self.retry_limit:
+            status = "exhausted"
+            logger.warning(f"Job {job_id} hit retry limit ({self.retry_limit})")
+        else:
+            status = "pending"
+
+        await self.collection.update_one(
+            {"_id": job_id},
+            {"$set": {"status": status, "retries": retries, "reason": error_msg}}
+        )
+
+    async def get_pending_jobs(self, limit: int = 50) -> List[Dict[str, Any]]:
         cursor = self.collection.find({"status": "pending"}).limit(limit)
-        ret
+        return [doc async for doc in cursor]
+
+    async def retry_failed_jobs(self, limit: int = 100) -> int:
+        count = 0
+        async for job in self.collection.find({"status": "failed", "retries": {"$lt": self.retry_limit}}).limit(limit):
+            job_id = job["_id"]
+            await self.collection.update_one({"_id": job_id}, {"$set": {"status": "pending"}})
+            logger.info(f"Retrying job {job_id} (retry {job.get('retries', 0) + 1})")
+            count += 1
+        return count
