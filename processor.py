@@ -73,6 +73,7 @@ class Processor:
         if self.calculator is None:
             self.calculator = Calculator(self.db, site_settings)
 
+        # Translate fields using the Translator class for required fields
         translated = await self.translator.translate_fields(raw, site_settings, raw.get("_id"), self.site)
         if not translated:
             logger.warning(f"[SKIP] {raw.get('_id')} - Translation failed or incomplete")
@@ -105,8 +106,8 @@ class Processor:
         doc["im_status"] = True
         doc["updated_at"] = datetime.utcnow()
 
-        # --- Handle missing fields ---
-        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", 0)  # Get from Basicdata object
+        # --- Handle Missing Fields ---
+        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", 0)  # Seats field from Basicdata
         doc["im_body_type"] = raw.get("Basicdata", {}).get("Body", "")  # Body type from Basicdata
         doc["im_gearbox"] = raw.get("gearbox", "")  # Gearbox from raw
         doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Combined make/model
