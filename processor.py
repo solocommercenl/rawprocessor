@@ -20,7 +20,7 @@ from translator import Translator
 from calculator import Calculator
 from site_settings import SiteSettings
 from jobqueue import WPQueue
-from utils import calculate_hash_groups, normalize_make_model
+from utils import calculate_hash_groups
 from cleaner import clean_raw_record
 
 REQUIRED_RAW_FIELDS = ["price", "registration", "Fueltype", "raw_emissions", "Images"]
