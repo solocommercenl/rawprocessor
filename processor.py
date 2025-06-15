@@ -70,6 +70,8 @@ class Processor:
             )
 
     async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
+        if self.calculator is None:
+            self.calculator = Calculator(self.db, site_settings)
         # Translate using raw field names; output is processed keys (im_*)
         translated = await self.translator.translate_fields(raw, site_settings, raw.get("_id"), self.site)
         if not translated:
