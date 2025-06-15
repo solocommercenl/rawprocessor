@@ -5,8 +5,8 @@ Module for cleaning and validating raw vehicle data for the rawprocessor middlew
 
 Responsibilities:
 - Clean/validate each raw record (dict) per project rules.
-- Normalize registration format and gallery.
-- Validate raw fields (price, emissions, image count).
+- Normalize registration format and gallery/images.
+- Validate raw fields (price, registration, emissions, image count, Fueltype, Equipment).
 - Expose: `clean_raw_record(record, log_prefix) -> Union[Dict, None]`
 
 Dependencies:
@@ -18,12 +18,10 @@ from loguru import logger
 
 REQUIRED_FIELDS = ["price", "registration", "Fueltype", "raw_emissions", "Images"]
 
-
 def is_electric(fuel_type: Optional[str]) -> bool:
     if not fuel_type:
         return False
     return fuel_type.strip().lower() in {"electric", "elektrisch"}
-
 
 def normalize_gallery(images: Union[str, List[str]]) -> List[str]:
     if isinstance(images, list):
@@ -35,7 +33,6 @@ def normalize_gallery(images: Union[str, List[str]]) -> List[str]:
             return [url.strip() for url in images.split(",") if url.strip()]
         return [images.strip()] if images.strip() else []
     return []
-
 
 def clean_raw_record(
     record: Dict[str, Any],
@@ -75,5 +72,5 @@ def clean_raw_record(
         logger.warning(f"{log_prefix} Record excluded: {', '.join(reasons)} | _id={record.get('_id')}")
         return None
 
-    record["Images"] = images  # cleaned
+    record["Images"] = images  # cleaned gallery
     return record

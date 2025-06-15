@@ -1,3 +1,5 @@
+# process_one.py
+
 import asyncio
 import os
 import json
@@ -20,6 +22,7 @@ async def main():
     client = AsyncIOMotorClient(MONGO_URI)
     db = client[DB_NAME]
 
+    # Load one raw record (by id or just the first)
     if RAW_ID:
         from bson import ObjectId
         raw = await db.raw.find_one({"_id": ObjectId(RAW_ID)})
@@ -31,15 +34,13 @@ async def main():
         return
 
     settings = await SiteSettings(db).get(SITE)
-    translator = Translator(db)
-    calculator = Calculator(db, SITE)
-    processor = Processor(db, SITE)
-
-    if not clean_raw_record(raw, f"[{SITE}]"):
+    cleaned = clean_raw_record(raw, f"[{SITE}]")
+    if not cleaned:
         print("Raw record failed cleaner and would be excluded.")
         return
 
-    processed = await processor.process(raw, settings)
+    processor = Processor(db, SITE)
+    processed = await processor.process(cleaned, settings)
     if not processed:
         print("Processing returned None. Record would not be imported.")
         return

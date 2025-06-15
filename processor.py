@@ -3,8 +3,8 @@ processor.py
 ------------
 Main orchestrator module for rawprocessor Stage 1.
 - Loads per-site settings (filters, translation profile, etc).
-- Enforces all filter_criteria and data validation before translation/calculation.
-- Calls translator and calculator, checks group hashes for partial update logic.
+- Cleans and validates raw using only raw field names.
+- Translates and calculates, mapping to JetEngine/processed keys only at output.
 - Writes eligible records to processed_{site}.
 - Logs all processing steps, skips, and reasons.
 """
@@ -23,7 +23,7 @@ from jobqueue import WPQueue
 from utils import calculate_hash_groups, normalize_make_model
 from cleaner import clean_raw_record
 
-REQUIRED_FIELDS = ["price", "registration", "Fueltype", "raw_emissions"]
+REQUIRED_RAW_FIELDS = ["price", "registration", "Fueltype", "raw_emissions", "Images"]
 
 class Processor:
     def __init__(self, db: AsyncIOMotorDatabase, site: str):
@@ -41,17 +41,15 @@ class Processor:
         cursor = self.db.raw.find({"listing_status": True, **filters})
 
         async for raw in cursor:
-            if not clean_raw_record(raw, f"[{self.site}]"):
+            cleaned = clean_raw_record(raw, f"[{self.site}]")
+            if not cleaned:
                 continue
-
-            if not self._has_required_fields(raw):
+            if not self._has_required_fields(cleaned):
                 logger.warning(f"[SKIP] {raw.get('_id')} - Missing required raw fields")
                 continue
-
-            processed = await self.process(raw, settings)
+            processed = await self.process(cleaned, settings)
             if not processed:
                 continue
-
             changed, hash_groups, changed_fields = await self.should_sync(processed)
             if not changed:
                 logger.info(f"[NOCHANGE] {processed['im_ad_id']} - No field group changed")
@@ -72,6 +70,7 @@ class Processor:
             )
 
     async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
+        # Translate using raw field names; output is processed keys (im_*)
         translated = await self.translator.translate_fields(raw, site_settings, raw.get("_id"), self.site)
         if not translated:
             logger.warning(f"[SKIP] {raw.get('_id')} - Translation failed or incomplete")
@@ -80,10 +79,11 @@ class Processor:
         vated = str(raw.get("vatded", "false")).lower() == "true"
         financials = await self.calculator.calculate_financials(raw, vated)
 
+        # Build the processed output dict (only now assign to processed/JetEngine field names)
         doc = {**translated, **financials, "im_status": True}
         doc["make"], doc["model"] = normalize_make_model(doc.get("make", ""), doc.get("model", ""))
         doc["updated_at"] = datetime.utcnow()
-        doc["im_ad_id"] = raw["im_ad_id"]
+        doc["im_ad_id"] = raw.get("im_ad_id") or raw.get("ad_id") or raw.get("_id")
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
         doc["_is_new"] = not bool(existing)
@@ -101,4 +101,4 @@ class Processor:
         return (bool(changed), current_hashes, changed)
 
     def _has_required_fields(self, raw: Dict[str, Any]) -> bool:
-        return all(field in raw and raw[field] not in [None, ""] for field in REQUIRED_FIELDS)
+        return all(field in raw and raw[field] not in [None, ""] for field in REQUIRED_RAW_FIELDS)
