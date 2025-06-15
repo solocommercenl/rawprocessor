@@ -1,3 +1,8 @@
+from typing import Dict, Any, Optional
+from motor.motor_asyncio import AsyncIOMotorDatabase  # Ensure AsyncIOMotorDatabase is imported
+from loguru import logger
+from utils import normalize_gallery  # Ensure normalize_gallery is imported
+
 async def clean_raw_record(
     record: Dict[str, Any],
     db: AsyncIOMotorDatabase,  # Ensure db parameter is recognized
@@ -21,9 +26,9 @@ async def clean_raw_record(
 
     # Ensure raw_emissions is a number and handle empty string or None values
     emissions_value = None
-    if isinstance(raw_emissions, (int, float)):  # If raw_emissions is already a number
+    if isinstance(raw_emissions, (int, float)):  # if raw_emissions is already a number
         emissions_value = raw_emissions
-    elif isinstance(raw_emissions, str):  # If raw_emissions is a string (shouldn't be, but just in case)
+    elif isinstance(raw_emissions, str):  # if raw_emissions is a string (shouldn't be, but just in case)
         emissions_value = ''.join(filter(str.isdigit, raw_emissions))  # Extract numeric part
         emissions_value = int(emissions_value) if emissions_value else None
     
