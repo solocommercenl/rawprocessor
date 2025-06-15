@@ -4,7 +4,7 @@ import json
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from site_settings import SiteSettings
-from cleaner import Cleaner
+from cleaner import clean_raw_record
 from translator import Translator
 from calculator import Calculator
 from processor import Processor
@@ -20,7 +20,6 @@ async def main():
     client = AsyncIOMotorClient(MONGO_URI)
     db = client[DB_NAME]
 
-    # Load one raw record (by id or just the first)
     if RAW_ID:
         from bson import ObjectId
         raw = await db.raw.find_one({"_id": ObjectId(RAW_ID)})
@@ -32,13 +31,11 @@ async def main():
         return
 
     settings = await SiteSettings(db).get(SITE)
-    cleaner = Cleaner(db, SITE)
     translator = Translator(db)
     calculator = Calculator(db, SITE)
     processor = Processor(db, SITE)
 
-    # Check if record is valid
-    if not await cleaner.is_valid(raw):
+    if not clean_raw_record(raw, f"[{SITE}]"):
         print("Raw record failed cleaner and would be excluded.")
         return
 
