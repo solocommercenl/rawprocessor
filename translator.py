@@ -56,7 +56,6 @@ class Translator:
         for container, key, im_field, trans_key in raw_fields:
             val = get_nested(raw, container, key)
             if val is None:
-                logger.warning(f"[TRANSLATION] Field '{key}' missing in '{container}'. Skipping translation.")
                 continue  # Skip if the field is missing in raw data
             translated_val = await self._translate_value(val, trans_key, translation_map, site, im_field, record_id)
             output[im_field] = translated_val  # Add translated or raw value
@@ -112,17 +111,11 @@ class Translator:
         result = None
         mapping = translation_map.get(trans_key, {})
 
-        # Log the raw value before translation (for debugging)
-        logger.debug(f"[TRANSLATION] Attempting to translate field '{field}' with raw value: '{val}'")
-
         # Get the translated value if available
         result = mapping.get(val)
 
         # If no result is found, log the missing translation and use the raw value
         if result is None:
-            logger.warning(
-                f"[{site or '-'}][{field}] Missing translation for value: '{val}' (record: {record_id or '-'})"
-            )
             result = raw_value  # Use raw value when no translation is available
         
         return result
