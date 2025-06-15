@@ -17,33 +17,32 @@ async def clean_raw_record(
     """
     reasons = []
 
-    # 1. Fueltype must be "Electric" for raw_emissions to be allowed as 0 or null
+    # 1. Fueltype must be "Electric" for raw_emissions to be allowed as 0
     fuel = record.get("Fueltype", "").strip()
     raw_emissions = record.get("raw_emissions")
-    
+
     # Debugging the raw_emissions value
     logger.info(f"{log_prefix} Checking raw_emissions value: {raw_emissions} | _id={record.get('_id')}")
 
-    # Ensure raw_emissions is a number (it is always a number, but just in case)
-    emissions_value = raw_emissions  # raw_emissions is already a number
-    
-    # 2. Exclude if raw_emissions is 0 or empty, and the Fueltype is not Electric
-    if emissions_value == 0 or emissions_value is None:
+    # Ensure raw_emissions is a valid number (it should always be a number)
+    emissions_value = raw_emissions  # raw_emissions is always a number
+
+    # 2. Check if raw_emissions is 0 and Fueltype is not "Electric"
+    if emissions_value == 0:
         if "Electric" not in fuel:  # If it's not Electric, delete the record
-            reasons.append("Invalid raw_emissions value (0 or empty)")
+            reasons.append("Invalid raw_emissions value (0)")
 
     # 3. Images count must be >= 4
     images = normalize_gallery(record.get("Images", []))  # Normalize the gallery (image URLs)
     if len(images) < 4:
         reasons.append("Insufficient images (less than 4)")
 
-    # If there are reasons to exclude the record, log and delete it
     if reasons:
         logger.warning(f"{log_prefix} Record excluded: {', '.join(reasons)} | _id={record.get('_id')}")
-        
+
         # Delete invalid records from raw collection
         await db.raw.delete_one({"_id": record.get("_id")})  # Deleting the invalid record
-        
+
         return None
 
     record["Images"] = images  # cleaned gallery
