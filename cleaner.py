@@ -1,10 +1,11 @@
 from typing import Dict, Any, Optional
-from motor.motor_asyncio import AsyncIOMotorDatabase  # Add this import
+from motor.motor_asyncio import AsyncIOMotorDatabase  # Ensure AsyncIOMotorDatabase is imported
 from loguru import logger
+from utils import normalize_gallery  # Ensure normalize_gallery is imported
 
 async def clean_raw_record(
     record: Dict[str, Any],
-    db: AsyncIOMotorDatabase,  # Now the db parameter is recognized
+    db: AsyncIOMotorDatabase,  # Ensure db parameter is recognized
     log_prefix: str = ""
 ) -> Optional[Dict[str, Any]]:
     """
