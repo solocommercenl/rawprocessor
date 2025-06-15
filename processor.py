@@ -104,14 +104,14 @@ class Processor:
         doc["im_product_url"] = raw.get("Product_URL", "")
         doc["im_status"] = True
         doc["updated_at"] = datetime.utcnow()
-        doc["im_seats"] = raw.get("seats", 0)  # Seats field from raw
-        doc["im_body_type"] = raw.get("body_type", "")  # Body type field from raw
+
+        # --- Handle missing fields ---
+        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", "")  # Get from Basicdata object
+        doc["im_body_type"] = raw.get("Basicdata", {}).get("Body", "")  # Body type from Basicdata
         doc["im_gearbox"] = raw.get("gearbox", "")  # Gearbox field from raw
         doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Combined make/model
 
-       
         # --- Taxonomy Fields ---
-        # Handle make/model as taxonomies
         doc["make"] = raw.get("brand", "")  # Make as taxonomy
         doc["model"] = raw.get("model", "")  # Model as taxonomy
         doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")  # Color as taxonomy
@@ -124,14 +124,9 @@ class Processor:
             else:
                 doc[k] = v
 
-        # Ensure make/model normalization for taxonomy (if needed)
+        # --- Ensure make/model normalization for taxonomy ---
         doc["make"] = raw.get("brand", "")  # Make as taxonomy
         doc["model"] = raw.get("model", "")  # Model as taxonomy
-
-        # Add missing fields from raw, including im_seats, im_body_type, im_gearbox
-        doc["im_seats"] = raw.get("seats", 0)  # Ensure seats field is included
-        doc["im_body_type"] = raw.get("body_type", "")  # Ensure body type is included
-        doc["im_gearbox"] = raw.get("gearbox", "")  # Add gearbox as required
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
         doc["_is_new"] = not bool(existing)
