@@ -84,14 +84,11 @@ class Processor:
         # Explicit field mapping to JetEngine/processed fields
         doc: Dict[str, Any] = {}
 
-        # Required fields
+        # --- Combined Block for Meta Fields ---
         doc["im_ad_id"] = raw.get("car_id", "")
-        doc["make"] = raw.get("brand", "")
-        doc["model"] = raw.get("model", "")
-        doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()
         doc["im_title"] = raw.get("title", "")
         doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
-        doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""
+        doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""  # Featured image
         doc["im_price_org"] = round(float(raw.get("price", 0)), 2)  # Derived from price
         doc["im_registration_year"] = str(raw.get("registration_year", "")) or str(raw.get("im_registration_year", ""))
         doc["im_first_registration"] = raw.get("registration", "")
@@ -107,8 +104,19 @@ class Processor:
         doc["im_product_url"] = raw.get("Product_URL", "")
         doc["im_status"] = True
         doc["updated_at"] = datetime.utcnow()
+        doc["im_seats"] = raw.get("seats", 0)  # Seats field from raw
+        doc["im_body_type"] = raw.get("body_type", "")  # Body type field from raw
+        doc["im_gearbox"] = raw.get("gearbox", "")  # Gearbox field from raw
+        doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Combined make/model
 
-        # Add translated and calculated fields
+       
+        # --- Taxonomy Fields ---
+        # Handle make/model as taxonomies
+        doc["make"] = raw.get("brand", "")  # Make as taxonomy
+        doc["model"] = raw.get("model", "")  # Model as taxonomy
+        doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")  # Color as taxonomy
+        
+        # --- Add translated and calculated fields ---
         doc.update(translated)
         for k, v in financials.items():
             if isinstance(v, float):
@@ -116,15 +124,12 @@ class Processor:
             else:
                 doc[k] = v
 
-        # Taxonomy field (color)
-        doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")
-
         # Ensure make/model normalization for taxonomy (if needed)
-        doc["make"] = raw.get("brand", "")  # make as taxonomy
-        doc["model"] = raw.get("model", "")  # model as taxonomy
+        doc["make"] = raw.get("brand", "")  # Make as taxonomy
+        doc["model"] = raw.get("model", "")  # Model as taxonomy
 
-        # Add missing fields from raw
-        doc["im_seats"] = raw.get("seats", 0)  # Example of seat mapping
+        # Add missing fields from raw, including im_seats, im_body_type, im_gearbox
+        doc["im_seats"] = raw.get("seats", 0)  # Ensure seats field is included
         doc["im_body_type"] = raw.get("body_type", "")  # Ensure body type is included
         doc["im_gearbox"] = raw.get("gearbox", "")  # Add gearbox as required
 
