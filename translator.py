@@ -64,7 +64,6 @@ class Translator:
         """
         translation_map = await self.load_translation_profile(site_settings)
 
-        # Fields to translate (meta)
         meta_fields = [
             ("im_fuel_type", "fuel_type"),
             ("im_gearbox", "gearbox"),
@@ -72,7 +71,6 @@ class Translator:
             ("im_upholstery", "upholstery"),
         ]
 
-        # Option fields (arrays)
         options_fields = [
             ("im_comfort_convenience", "options"),
             ("im_entertainment_media", "options"),
@@ -80,32 +78,26 @@ class Translator:
             ("im_safety_security", "options"),
         ]
 
-        # Taxonomies that must be translated
-        tax_fields = [
-            ("color", "color"),  # color: taxonomy, must be translated
-        ]
+        tax_fields = [("color", "color")]
 
         translated: Dict[str, Any] = {}
+        failed_fields: List[str] = []
 
-        # Translate meta fields
         for field, trans_key in meta_fields:
             val = input_record.get(field)
             if val is None:
                 continue
-            translated_val = self._translate_value(
-                val, trans_key, translation_map, site, field, record_id
-            )
+            translated_val = self._translate_value(val, trans_key, translation_map, site, field, record_id)
             if translated_val is not None:
                 translated[field] = translated_val
+            else:
+                failed_fields.append(f"{field}='{val}'")
 
-        # Translate options (array fields)
         for field, trans_key in options_fields:
             raw_options = input_record.get(field)
             if not raw_options:
                 continue
-            # Accept both comma/pipe/array for input; normalize to list
             if isinstance(raw_options, str):
-                # Try to split by common delimiters, then filter out blanks
                 opts = [x.strip() for x in raw_options.replace('|', ',').split(',') if x.strip()]
             elif isinstance(raw_options, list):
                 opts = raw_options
@@ -113,24 +105,29 @@ class Translator:
                 opts = []
             mapped_options = []
             for opt in opts:
-                translated_val = self._translate_value(
-                    opt, trans_key, translation_map, site, field, record_id
-                )
+                translated_val = self._translate_value(opt, trans_key, translation_map, site, field, record_id)
                 if translated_val is not None:
                     mapped_options.append(translated_val)
+                else:
+                    failed_fields.append(f"{field}[]='{opt}'")
             if mapped_options:
                 translated[field] = mapped_options
 
-        # Translate taxonomy fields (color only, for now)
         for field, trans_key in tax_fields:
             val = input_record.get(field)
             if val is None:
                 continue
-            translated_val = self._translate_value(
-                val, trans_key, translation_map, site, field, record_id
-            )
+            translated_val = self._translate_value(val, trans_key, translation_map, site, field, record_id)
             if translated_val is not None:
                 translated[field] = translated_val
+            else:
+                failed_fields.append(f"{field}='{val}'")
+
+        if not translated:
+            logger.warning(
+                f"[TRANSLATE FAIL] {record_id or '-'} @ {site or '-'} - no translated fields found. "
+                f"Untranslated: {failed_fields}"
+            )
 
         return translated
 
