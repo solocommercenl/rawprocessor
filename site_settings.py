@@ -6,31 +6,13 @@ Async module to load, validate, and expose per-site settings for the rawprocesso
 Responsibilities:
 - Load per-site config (filters, financials, translation_profile, WP root, etc.) from MongoDB.
 - Validate structure and required fields.
-- Expose as an async singleton or per-site cache.
+- Expose as an async class with optional in-memory cache.
 - Raise/log clear errors on missing or invalid configs.
-
-Dependencies:
-    - motor (async MongoDB)
-    - loguru (logging)
-    - os, dotenv (for DB connection)
 """
 
-import os
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional
 from loguru import logger
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from dotenv import load_dotenv
-
-# Load .env variables for MongoDB connection
-load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "autodex")
-
-if not MONGO_URI:
-    raise RuntimeError("MONGO_URI not set in .env")
-
-client = AsyncIOMotorClient(MONGO_URI)
-db: AsyncIOMotorDatabase = client[MONGO_DB]
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 REQUIRED_FIELDS = [
     "site_url",
@@ -47,50 +29,51 @@ REQUIRED_FIELDS = [
 class SiteSettingsError(Exception):
     """Custom error for settings failures."""
 
-async def fetch_site_settings(site_url: str) -> Dict[str, Any]:
+class SiteSettings:
     """
-    Fetch and validate settings for a specific site from the site_settings collection.
-    :param site_url: The domain/URL of the site to fetch settings for.
-    :raises SiteSettingsError: On missing or invalid settings.
-    :return: Settings dict.
+    Loads and caches per-site settings from MongoDB (site_settings collection).
+    Usage:
+        settings = await SiteSettings(db).get(site_key)
     """
-    logger.debug(f"Loading site settings for {site_url}")
-    doc = await db.site_settings.find_one({"site_url": site_url})
-    if not doc:
-        logger.error(f"Site settings not found for {site_url}")
-        raise SiteSettingsError(f"Settings not found for site: {site_url}")
+    _cache: Dict[str, Dict[str, Any]] = {}
 
-    missing = [field for field in REQUIRED_FIELDS if field not in doc]
-    if missing:
-        logger.error(f"Missing fields in settings for {site_url}: {missing}")
-        raise SiteSettingsError(f"Settings for {site_url} missing required fields: {missing}")
+    def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
 
-    # Optionally validate filter_criteria structure
-    filter_criteria = doc["filter_criteria"]
-    if not isinstance(filter_criteria, dict):
-        logger.error(f"filter_criteria must be a dict for {site_url}")
-        raise SiteSettingsError(f"filter_criteria invalid in {site_url} settings")
+    async def get(self, site_key: str, use_cache: bool = True) -> Dict[str, Any]:
+        """
+        Fetch settings for a given site_key (e.g. 'solostaging'), with optional in-memory cache.
+        :param site_key: The domain/unique key for the site (e.g. "solostaging" or domain).
+        :param use_cache: If True, uses in-memory cache (per process).
+        """
+        cache_key = site_key.lower()
+        if use_cache and cache_key in self._cache:
+            return self._cache[cache_key]
+        # Find on "site_url" field, supporting both exact and regex/substring matching
+        doc = await self.db.site_settings.find_one({
+            "$or": [
+                {"site_url": site_key},
+                {"site_url": {"$regex": site_key, "$options": "i"}}
+            ]
+        })
+        if not doc:
+            logger.error(f"Site settings not found for site_key: {site_key}")
+            raise SiteSettingsError(f"Settings not found for site: {site_key}")
 
-    # Validate price_margins if present
-    if "price_margins" in doc and not isinstance(doc["price_margins"], list):
-        logger.warning(f"price_margins should be a list in {site_url}")
+        missing = [field for field in REQUIRED_FIELDS if field not in doc]
+        if missing:
+            logger.error(f"Missing fields in settings for {site_key}: {missing}")
+            raise SiteSettingsError(f"Settings for {site_key} missing required fields: {missing}")
 
-    logger.info(f"Site settings loaded for {site_url}")
-    return doc
+        filter_criteria = doc["filter_criteria"]
+        if not isinstance(filter_criteria, dict):
+            logger.error(f"filter_criteria must be a dict for {site_key}")
+            raise SiteSettingsError(f"filter_criteria invalid in {site_key} settings")
 
-# Optionally: Simple in-memory cache for site settings (to avoid repeat lookups during batch runs)
-_site_settings_cache: Dict[str, Dict[str, Any]] = {}
+        if "price_margins" in doc and not isinstance(doc["price_margins"], list):
+            logger.warning(f"price_margins should be a list in {site_key}")
 
-async def get_site_settings(site_url: str, use_cache: bool = True) -> Dict[str, Any]:
-    """
-    Get (optionally cached) settings for a site.
-    :param site_url: Site domain/URL.
-    :param use_cache: Use in-memory cache if available.
-    :return: Site settings dict.
-    """
-    if use_cache and site_url in _site_settings_cache:
-        return _site_settings_cache[site_url]
-    settings = await fetch_site_settings(site_url)
-    if use_cache:
-        _site_settings_cache[site_url] = settings
-    return settings
+        logger.info(f"Site settings loaded for {site_key}")
+        if use_cache:
+            self._cache[cache_key] = doc
+        return doc
