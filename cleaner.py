@@ -24,21 +24,13 @@ async def clean_raw_record(
     # Debugging the raw_emissions value
     logger.info(f"{log_prefix} Checking raw_emissions value: {raw_emissions} | _id={record.get('_id')}")
 
-    # Ensure raw_emissions is a number and handle empty string or None values
-    emissions_value = None
-    if isinstance(raw_emissions, (int, float)):  # if raw_emissions is already a number
-        emissions_value = raw_emissions
-    elif isinstance(raw_emissions, str):  # if raw_emissions is a string (shouldn't be, but just in case)
-        emissions_value = ''.join(filter(str.isdigit, raw_emissions))  # Extract numeric part
-        emissions_value = int(emissions_value) if emissions_value else None
+    # Validate that raw_emissions is a number (either 0 or positive)
+    emissions_value = raw_emissions  # raw_emissions is always a number
     
-    # Log the emissions_value for debugging
-    logger.info(f"{log_prefix} Parsed raw_emissions value: {emissions_value} | _id={record.get('_id')}")
-
-    # Check if raw_emissions is invalid (0, null, or empty) and Fueltype is not "Electric"
-    if emissions_value in [None, 0]:
+    # Check if raw_emissions is invalid (0 or empty) and Fueltype is not "Electric"
+    if emissions_value == 0 or emissions_value is None:  # Only exclude if emissions is 0 or empty
         if "Electric" not in fuel:  # If it's not Electric, delete the record
-            reasons.append("Invalid raw_emissions value (0, null, or empty)")
+            reasons.append("Invalid raw_emissions value (0 or empty)")
 
     # 2. Images count must be >= 4
     images = normalize_gallery(record.get("Images", []))  # Normalize the gallery (image URLs)
