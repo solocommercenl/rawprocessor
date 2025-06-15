@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List, Optional, Union  # Added missing imports
+from typing import Dict, Any, List, Optional, Union
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
 
@@ -36,10 +36,10 @@ class Translator:
         # Meta fields to translate
         raw_fields = [
             ("Fueltype", "im_fuel_type", "fuel_type"),
-            ("Gearbox", "im_gearbox", "gearbox"),
-            ("Body", "im_body_type", "body_type"),
-            ("Upholstery", "im_upholstery", "upholstery"),
-            ("Colour", "color", "color")  # Correct mapping for color
+            ("Gearbox", "im_gearbox", "gearbox"),  # Map Gearbox correctly to im_gearbox
+            ("Body", "im_body_type", "body_type"),  # Map Body correctly to im_body_type
+            ("Upholstery", "im_upholstery", "upholstery"),  # Map Upholstery correctly
+            ("Colour", "color", "color")  # Map Colour correctly to color
         ]
 
         # Process each raw field and translate it
