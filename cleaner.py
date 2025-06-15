@@ -21,13 +21,21 @@ async def clean_raw_record(
     fuel = record.get("Fueltype", "").strip()
     emissions = record.get("raw_emissions")
     
+    # Ensure raw_emissions is a number and handle empty string or None values
+    emissions_value = None
+    if isinstance(emissions, (int, float)):  # if emissions is already a number
+        emissions_value = emissions
+    elif isinstance(emissions, str):  # if emissions is a string (e.g., "130 g/km")
+        emissions_value = ''.join(filter(str.isdigit, emissions))  # extract numeric part
+        emissions_value = int(emissions_value) if emissions_value else None
+    
     # Check if raw_emissions is invalid (0, null, or empty) and Fueltype is not "Electric"
-    if emissions in [None, ""] or emissions == 0:
+    if emissions_value in [None, 0]:
         if fuel != "Electric":  # If it's not Electric, delete the record
             reasons.append("Invalid raw_emissions value (0, null, or empty)")
 
     # 2. Images count must be >= 4
-    images = normalize_gallery(record.get("Images", []))
+    images = normalize_gallery(record.get("Images", []))  # Normalize the gallery (image URLs)
     if len(images) < 4:
         reasons.append("Insufficient images (less than 4)")
 
