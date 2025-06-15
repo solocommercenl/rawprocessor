@@ -84,7 +84,7 @@ class Processor:
         # Explicit field mapping to JetEngine/processed fields
         doc: Dict[str, Any] = {}
 
-        # --- Combined Block for Meta Fields ---
+        # --- Combined Block for Meta and Taxonomy Fields ---
         doc["im_ad_id"] = raw.get("car_id", "")
         doc["im_title"] = raw.get("title", "")
         doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
@@ -106,16 +106,16 @@ class Processor:
         doc["updated_at"] = datetime.utcnow()
 
         # --- Handle missing fields ---
-        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", "")  # Get from Basicdata object
+        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", 0)  # Get from Basicdata object
         doc["im_body_type"] = raw.get("Basicdata", {}).get("Body", "")  # Body type from Basicdata
-        doc["im_gearbox"] = raw.get("gearbox", "")  # Gearbox field from raw
+        doc["im_gearbox"] = raw.get("gearbox", "")  # Gearbox from raw
         doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Combined make/model
 
         # --- Taxonomy Fields ---
         doc["make"] = raw.get("brand", "")  # Make as taxonomy
         doc["model"] = raw.get("model", "")  # Model as taxonomy
         doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")  # Color as taxonomy
-        
+
         # --- Add translated and calculated fields ---
         doc.update(translated)
         for k, v in financials.items():
@@ -124,9 +124,9 @@ class Processor:
             else:
                 doc[k] = v
 
-        # --- Ensure make/model normalization for taxonomy ---
-        doc["make"] = raw.get("brand", "")  # Make as taxonomy
-        doc["model"] = raw.get("model", "")  # Model as taxonomy
+        # --- Raw Emissions and VAT Deductible ---
+        doc["im_raw_emissions"] = raw.get("raw_emissions") or raw.get("energyconsumption", {}).get("raw_emissions")
+        doc["im_vat_deductible"] = raw.get("vatded", False)  # No condition, pass as is
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
         doc["_is_new"] = not bool(existing)
