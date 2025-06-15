@@ -9,7 +9,7 @@ import hashlib
 import re
 import logging
 from datetime import datetime
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List, Union
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 logger = logging.getLogger("rawprocessor.utils")
@@ -109,3 +109,19 @@ async def get_phev_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions:
 # --- Mongo Diesel Surcharge Lookup ---
 async def get_diesel_surcharge(db: AsyncIOMotorDatabase, reg_year: int) -> Optional[dict]:
     return await db.diesel_surcharges.find_one({"year": reg_year})
+
+# --- Normalize Gallery ---
+def normalize_gallery(images: Union[str, List[str]]) -> List[str]:
+    """
+    Normalize the gallery by converting a string of image URLs into a list of URLs.
+    It handles both `str` and `list` inputs.
+    """
+    if isinstance(images, list):
+        return [url.strip() for url in images if url.strip()]
+    if isinstance(images, str):
+        if "|" in images:
+            return [url.strip() for url in images.split("|") if url.strip()]
+        elif "," in images:
+            return [url.strip() for url in images.split(",") if url.strip()]
+        return [images.strip()] if images.strip() else []
+    return []
