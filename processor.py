@@ -1,127 +1,104 @@
 """
-main.py
-
-Entrypoint and orchestrator for rawprocessor.
-Handles all triggers: raw insert/update, status change, site/translation updates, and batch jobs.
-Supports CLI for: --trigger --site, --retry-failed, --rebuild-site
+processor.py
+------------
+Main orchestrator module for rawprocessor Stage 1.
+- Loads per-site settings (filters, translation profile, etc).
+- Enforces all filter_criteria and data validation before translation/calculation.
+- Calls translator and calculator, checks group hashes for partial update logic.
+- Writes eligible records to processed_{site}.
+- Logs all processing steps, skips, and reasons.
 """
 
 import asyncio
-import os
-import argparse
-from typing import Any, Dict
-from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
 
-from logger import configure_logger, log_exceptions
-from site_settings import SiteSettings
-from cleaner import Cleaner
 from translator import Translator
 from calculator import Calculator
-from processor import Processor
+from site_settings import get_site_settings
 from jobqueue import WPQueue
+from utils import calculate_hash_groups, normalize_make_model
+from cleaner import clean_raw_record
 
-load_dotenv()
-MONGO_URI = os.environ.get("MONGO_URI")
-DB_NAME = os.environ.get("MONGO_DB", "autodex")
-client = AsyncIOMotorClient(MONGO_URI)
-db = client[DB_NAME]
+REQUIRED_FIELDS = ["im_price_org", "im_registration_year", "im_fuel_type", "im_raw_emissions"]
 
-@log_exceptions
-async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None:
-    configure_logger(site)
-    logger.info(f"Processing trigger: {trigger} for site {site}")
+class Processor:
+    def __init__(self, db: AsyncIOMotorDatabase, site: str):
+        self.db = db
+        self.site = site
+        self.translator = Translator(db)
+        self.calculator: Optional[Calculator] = None
+        self.processed_collection = db[f"processed_{site}"]
+        self.queue_collection = db[f"wp_sync_queue_{site}"]
 
-    settings = await SiteSettings(db).get(site)
-    cleaner = Cleaner(db, site)
-    translator = Translator(db)
-    calculator = Calculator(db, site)
-    processor = Processor(db, site)
-    queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
+    async def run(self):
+        settings = await get_site_settings(self.db, self.site)
+        self.calculator = Calculator(self.db, settings)
+        filters = settings.get("filter_criteria", {})
+        cursor = self.db.raw.find({"listing_status": True, **filters})
 
-    if trigger == "raw.insert":
-        records = data.get("records", [])
-        for raw in records:
-            if not await cleaner.is_valid(raw):
-                logger.info(f"Excluded raw {raw.get('ad_id', '')} (failed cleaner)")
-                continue
-            processed = await processor.process(raw, settings)
-            if processed:
-                changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                if changed:
-                    await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-
-    elif trigger == "raw.update" or trigger == "raw.update.im_price":
-        record = data.get("record")
-        if not record:
-            logger.warning(f"No record in payload for trigger {trigger}")
-            return
-        if not await cleaner.is_valid(record):
-            logger.info(f"Excluded raw {record.get('ad_id', '')} (failed cleaner)")
-            return
-        processed = await processor.process(record, settings)
-        if processed:
-            changed, hash_groups, changed_fields = await processor.should_sync(processed)
-            if changed:
-                await queue.enqueue_job("update", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-
-    elif trigger == "raw.update.im_status_false":
-        record = data.get("record")
-        if not record:
-            logger.warning("No record found in data for raw.update.im_status_false")
-            return
-        processed = await processor.process(record, settings)
-        if processed:
-            await queue.enqueue_job("unpublish", processed["im_ad_id"], None, ["status"], {}, meta={"reason": trigger})
-
-    elif trigger == "site_settings.filters_changed":
-        cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
         async for raw in cursor:
-            if await cleaner.is_valid(raw):
-                processed = await processor.process(raw, settings)
-                if processed:
-                    changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                    if changed:
-                        await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-            else:
-                processed_doc = await db[f"processed_{site}"].find_one({"im_ad_id": raw.get("im_ad_id")})
-                if processed_doc and processed_doc.get("im_status", True):
-                    await queue.enqueue_job("unpublish", processed_doc["im_ad_id"], None, ["status"], {}, meta={"reason": "filters_changed → excluded"})
+            if not clean_raw_record(raw, f"[{self.site}]"):
+                continue
 
-    elif trigger == "site_settings.pricing_changed" or trigger == "weekly_scheduled_job":
-        cursor = db[f"processed_{site}"].find({})
-        async for doc in cursor:
-            processed = await processor.process(doc, settings)
-            if processed:
-                changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                if changed:
-                    await queue.enqueue_job("update", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
+            if not self._has_required_fields(raw):
+                logger.warning(f"[SKIP] {raw.get('_id')} - Missing required fields")
+                continue
 
-    else:
-        logger.warning(f"Unknown trigger: {trigger}")
+            processed = await self.process(raw, settings)
+            if not processed:
+                continue
 
-# --- CLI wrapper for manual triggering ---
-async def run_cli():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--site", required=True)
-    parser.add_argument("--trigger")
-    parser.add_argument("--retry-failed", action="store_true")
-    parser.add_argument("--rebuild-site", action="store_true")
-    args = parser.parse_args()
+            changed, hash_groups, changed_fields = await self.should_sync(processed)
+            if not changed:
+                logger.info(f"[NOCHANGE] {processed['im_ad_id']} - No field group changed")
+                continue
 
-    if args.retry_failed:
-        queue = WPQueue(db, args.site)
-        count = await queue.retry_failed_jobs()
-        logger.info(f"Retried {count} failed jobs for {args.site}")
-    elif args.rebuild_site:
-        processor = Processor(db, args.site)
-        await processor.run()
-        logger.info(f"Re-evaluated all raw listings for site {args.site}")
-    elif args.trigger:
-        await process_trigger(args.trigger, args.site, {})
-    else:
-        logger.error("Missing --trigger or --rebuild-site or --retry-failed")
+            await self.processed_collection.update_one(
+                {"im_ad_id": processed["im_ad_id"]}, {"$set": processed}, upsert=True
+            )
 
-if __name__ == "__main__":
-    asyncio.run(run_cli())
+            queue = WPQueue(self.db, self.site)
+            await queue.enqueue_job(
+                action="create" if processed.get("_is_new") else "update",
+                ad_id=processed["im_ad_id"],
+                post_id=None,
+                changed_fields=changed_fields,
+                hash_groups=hash_groups,
+                meta={"origin": "processor.run"}
+            )
+
+    async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
+        translated = await self.translator.translate(raw, self.site)
+        if not translated:
+            logger.warning(f"[SKIP] {raw.get('_id')} - Translation failed or incomplete")
+            return None
+
+        vated = str(raw.get("vatded", "false")).lower() == "true"
+        financials = await self.calculator.calculate_financials(raw, vated)
+
+        doc = {**translated, **financials, "im_status": True}
+        doc["make"], doc["model"] = normalize_make_model(doc.get("make", ""), doc.get("model", ""))
+        doc["updated_at"] = datetime.utcnow()
+        doc["im_ad_id"] = raw["im_ad_id"]
+
+        existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
+        doc["_is_new"] = not bool(existing)
+        doc["hashes"] = calculate_hash_groups(doc)
+        return doc
+
+    async def should_sync(self, processed_doc: dict) -> Tuple[bool, Dict[str, str], List[str]]:
+        current_hashes = processed_doc.get("hashes", {})
+        existing = await self.processed_collection.find_one({"im_ad_id": processed_doc["im_ad_id"]})
+        if not existing:
+            return True, current_hashes, list(current_hashes.keys())
+
+        old_hashes = existing.get("hashes", {})
+        changed = [k for k in current_hashes if old_hashes.get(k) != current_hashes[k]]
+        return (bool(changed), current_hashes, changed)
+
+    def _has_required_fields(self, raw: Dict[str, Any]) -> bool:
+        return all(field in raw and raw[field] not in [None, ""] for field in REQUIRED_FIELDS)
