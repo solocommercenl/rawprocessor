@@ -33,20 +33,30 @@ class Translator:
         # Map from raw field names to JetEngine/processed names for output
         output: Dict[str, Any] = {}
 
-        # Meta fields to translate
+        # Helper function to access nested fields
+        def get_nested(raw, *fields):
+            """Fetch field from nested dictionaries."""
+            val = raw
+            for field in fields:
+                if val is None:
+                    return None
+                val = val.get(field)
+            return val
+
+        # Meta fields to translate (with nested field lookups)
         raw_fields = [
-            ("Fueltype", "im_fuel_type", "fuel_type"),
-            ("Gearbox", "im_gearbox", "gearbox"),  # Ensure mapping for Gearbox
-            ("Body", "im_body_type", "body_type"),  # Ensure mapping for Body
-            ("Upholstery", "im_upholstery", "upholstery"),  # Ensure mapping for Upholstery
-            ("Colour", "color", "color")  # Ensure correct mapping for Colour to color
+            ("energyconsumption", "Fueltype", "im_fuel_type", "fuel_type"),
+            ("TechnicalData", "Gearbox", "im_gearbox", "gearbox"),
+            ("Basicdata", "Body", "im_body_type", "body_type"),
+            ("colourandupholstery", "Upholstery", "im_upholstery", "upholstery"),
+            ("colourandupholstery", "Colour", "color", "color")
         ]
 
         # Process each raw field and translate it
-        for raw_field, im_field, trans_key in raw_fields:
-            val = raw.get(raw_field)
+        for container, key, im_field, trans_key in raw_fields:
+            val = get_nested(raw, container, key)
             if val is None:
-                logger.warning(f"[TRANSLATION] Field '{raw_field}' missing in raw data. Skipping translation.")
+                logger.warning(f"[TRANSLATION] Field '{key}' missing in '{container}'. Skipping translation.")
                 continue  # Skip if the field is missing in raw data
             translated_val = await self._translate_value(val, trans_key, translation_map, site, im_field, record_id)
             output[im_field] = translated_val  # Add translated or raw value
