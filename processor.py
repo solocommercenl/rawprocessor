@@ -1,14 +1,3 @@
-"""
-processor.py
-------------
-Main orchestrator module for rawprocessor Stage 1.
-- Loads per-site settings (filters, translation profile, etc).
-- Cleans and validates raw using only raw field names.
-- Translates and calculates, mapping to JetEngine/processed keys only at output.
-- Writes eligible records to processed_{site}.
-- Logs all processing steps, skips, and reasons.
-"""
-
 import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -87,7 +76,12 @@ class Processor:
 
         # --- Combined Block for Meta and Taxonomy Fields ---
         doc["im_ad_id"] = raw.get("car_id", "")
-        doc["im_title"] = raw.get("title", "")
+        
+        # Construct im_title as make + model + modelVersion
+        make_model = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Make + Model from raw data
+        model_version = raw.get("title", "")  # Assuming title has the model version
+        doc["im_title"] = f"{make_model} {model_version}".strip()  # Combine make + model + version
+
         doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
         doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""  # Featured image
         doc["im_price_org"] = round(float(raw.get("price", 0)), 2)  # Derived from price
