@@ -118,7 +118,7 @@ class Processor:
         doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")  # Color as taxonomy
 
         # --- Add translated and calculated fields ---
-        doc.update(translated)
+        doc.update(translated)  # Ensure translated fields are merged with the doc
         for k, v in financials.items():
             if isinstance(v, float):
                 doc[k] = int(round(v, 0))  # Round all financial fields to integers (no decimals)
