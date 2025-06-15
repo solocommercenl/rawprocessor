@@ -18,7 +18,7 @@ from loguru import logger
 
 from translator import Translator
 from calculator import Calculator
-from site_settings import get_site_settings
+from site_settings import SiteSettings
 from jobqueue import WPQueue
 from utils import calculate_hash_groups, normalize_make_model
 from cleaner import clean_raw_record
@@ -35,7 +35,7 @@ class Processor:
         self.queue_collection = db[f"wp_sync_queue_{site}"]
 
     async def run(self):
-        settings = await get_site_settings(self.db, self.site)
+        settings = await SiteSettings(self.db).get(self.site)
         self.calculator = Calculator(self.db, settings)
         filters = settings.get("filter_criteria", {})
         cursor = self.db.raw.find({"listing_status": True, **filters})
