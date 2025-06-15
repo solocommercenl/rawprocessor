@@ -19,15 +19,10 @@ async def clean_raw_record(
 
     # 1. Fueltype must be "Electric" for raw_emissions to be allowed as 0 or null
     fuel = record.get("Fueltype", "").strip()
-    emissions = record.get("raw_emissions")
+    raw_emissions = record.get("raw_emissions")
     
     # Ensure raw_emissions is a number and handle empty string or None values
-    emissions_value = None
-    if isinstance(emissions, (int, float)):  # if emissions is already a number
-        emissions_value = emissions
-    elif isinstance(emissions, str):  # if emissions is a string (e.g., "130 g/km")
-        emissions_value = ''.join(filter(str.isdigit, emissions))  # extract numeric part
-        emissions_value = int(emissions_value) if emissions_value else None
+    emissions_value = raw_emissions  # raw_emissions is already a number
     
     # Check if raw_emissions is invalid (0, null, or empty) and Fueltype is not "Electric"
     if emissions_value in [None, 0]:
