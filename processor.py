@@ -84,6 +84,7 @@ class Processor:
         # Explicit field mapping to JetEngine/processed fields
         doc: Dict[str, Any] = {}
 
+        # Required fields
         doc["im_ad_id"] = raw.get("car_id", "")
         doc["make"] = raw.get("brand", "")
         doc["model"] = raw.get("model", "")
@@ -91,12 +92,11 @@ class Processor:
         doc["im_title"] = raw.get("title", "")
         doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
         doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""
-        doc["im_price_org"] = round(float(raw.get("price", 0)), 2)
+        doc["im_price_org"] = round(float(raw.get("price", 0)), 2)  # Derived from price
         doc["im_registration_year"] = str(raw.get("registration_year", "")) or str(raw.get("im_registration_year", ""))
         doc["im_first_registration"] = raw.get("registration", "")
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
-        doc["im_colour"] = raw.get("colourandupholstery", {}).get("Colour", "")
         doc["im_upholstery"] = raw.get("colourandupholstery", {}).get("Upholstery", "")
         doc["im_manufacturer_color"] = raw.get("colourandupholstery", {}).get("Manufacturercolour", "")
         doc["im_paint_type"] = raw.get("colourandupholstery", {}).get("Paint", "")
@@ -112,15 +112,16 @@ class Processor:
         doc.update(translated)
         for k, v in financials.items():
             if isinstance(v, float):
-                doc[k] = int(round(v, 0))  # round all financial fields to integers
+                doc[k] = int(round(v, 0))  # Round all financial fields to integers (no decimals)
             else:
                 doc[k] = v
 
-        # Add color as tax field
+        # Map color as a taxonomy field for JetEngine
         doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")
 
-        # Ensure make/model normalization for taxonomy (if needed)
-        # doc["make"], doc["model"] = normalize_make_model(doc["make"], doc["model"])
+        # Treat make and model as hierarchical taxonomies
+        doc["make"] = raw.get("brand", "")
+        doc["model"] = raw.get("model", "")
 
         existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
         doc["_is_new"] = not bool(existing)
