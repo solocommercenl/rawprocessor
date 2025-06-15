@@ -23,7 +23,7 @@ from jobqueue import WPQueue
 from utils import calculate_hash_groups, normalize_make_model
 from cleaner import clean_raw_record
 
-REQUIRED_FIELDS = ["im_price_org", "im_registration_year", "im_fuel_type", "im_raw_emissions"]
+REQUIRED_FIELDS = ["price", "registration", "Fueltype", "raw_emissions"]
 
 class Processor:
     def __init__(self, db: AsyncIOMotorDatabase, site: str):
@@ -45,7 +45,7 @@ class Processor:
                 continue
 
             if not self._has_required_fields(raw):
-                logger.warning(f"[SKIP] {raw.get('_id')} - Missing required fields")
+                logger.warning(f"[SKIP] {raw.get('_id')} - Missing required raw fields")
                 continue
 
             processed = await self.process(raw, settings)
@@ -72,7 +72,7 @@ class Processor:
             )
 
     async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
-        translated = await self.translator.translate(raw, self.site)
+        translated = await self.translator.translate_fields(raw, site_settings, raw.get("_id"), self.site)
         if not translated:
             logger.warning(f"[SKIP] {raw.get('_id')} - Translation failed or incomplete")
             return None
