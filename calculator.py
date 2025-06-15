@@ -51,7 +51,9 @@ class Calculator:
         """
         try:
             # --- Constants from site_settings ---
-            margin_pct = self._get_margin_pct(record.get("im_price_org", 0))
+            # Use price margin lookup on price (im_price_org or raw price)
+            price_for_margin = float(record.get("im_price_org") or record.get("price") or 0)
+            margin_pct = self._get_margin_pct(price_for_margin)
             vat_pct = 0.21
             licence_plate_fee = float(self.site_settings.get("licence_plate_fee", 125))
             rdw_inspection = float(self.site_settings.get("rdw_inspection", 300))
@@ -60,17 +62,35 @@ class Calculator:
             interest_rate = float(self.site_settings.get("annual_interest_rate", 0.08))
             loan_term_months = int(self.site_settings.get("loan_term_months", 72))
 
-            im_price_org = float(record.get("im_price_org") or 0)
+            # --- Raw price fallback ---
+            im_price_org = float(record.get("im_price_org") or record.get("price") or 0)
             if im_price_org <= 0:
-                logger.error("im_price_org missing or <= 0 for record: %s", record)
+                logger.error("im_price_org (or price) missing or <= 0 for record: %s", record)
                 raise ValueError("im_price_org missing or zero")
 
-            registration_date = record.get("im_first_registration")
-            registration_year = int(record.get("im_registration_year", 0) or 0)
-            fuel_type = record.get("im_fuel_type", "").lower()
-            raw_emissions = record.get("im_raw_emissions")
-            if raw_emissions is None:
-                raw_emissions = record.get("raw_emissions")
+            registration_date = (
+                record.get("im_first_registration")
+                or record.get("registration")
+                or record.get("vehiclehistory", {}).get("Firstregistration")
+            )
+            registration_year = (
+                int(record.get("im_registration_year", 0) or record.get("registration_year", 0) or 0)
+            )
+            fuel_type = (
+                record.get("im_fuel_type")
+                or record.get("Fueltype")
+                or record.get("energyconsumption", {}).get("Fueltype", "")
+            ).lower()
+            raw_emissions = (
+                record.get("im_raw_emissions")
+                or record.get("raw_emissions")
+                or record.get("energyconsumption", {}).get("raw_emissions")
+            )
+            if raw_emissions is not None:
+                try:
+                    raw_emissions = float(raw_emissions)
+                except Exception:
+                    raw_emissions = None
 
             # --- Step 1: Base price calculations ---
             if vated:
@@ -137,7 +157,7 @@ class Calculator:
                 "im_desired_remaining_debt": im_desired_remaining_debt,
                 "im_monthly_payment": im_monthly_payment
             }
-            logger.info("Calculated financials for record (ad_id=%s): %s", record.get("im_ad_id"), result)
+            logger.info("Calculated financials for record (ad_id=%s): %s", record.get("im_ad_id") or record.get("ad_id") or record.get("_id"), result)
             return result
 
         except Exception as ex:
