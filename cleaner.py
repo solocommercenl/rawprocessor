@@ -1,3 +1,6 @@
+from typing import Dict, Any, Optional
+from loguru import logger
+
 async def clean_raw_record(
     record: Dict[str, Any],
     db: AsyncIOMotorDatabase,  # Add db parameter to delete from MongoDB
