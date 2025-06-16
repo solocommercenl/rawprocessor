@@ -16,7 +16,7 @@ from loguru import logger
 
 from logger import configure_logger, log_exceptions
 from site_settings import SiteSettings
-from cleaner import Cleaner
+from cleaner import clean_raw_record
 from translator import Translator
 from calculator import Calculator
 from processor import Processor
