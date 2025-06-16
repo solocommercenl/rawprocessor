@@ -1,11 +1,3 @@
-"""
-main.py
-
-Entrypoint and orchestrator for rawprocessor.
-Handles all triggers: raw insert/update, status change, site/translation updates, and batch jobs.
-Supports CLI for: --trigger --site, --retry-failed, --rebuild-site
-"""
-
 import asyncio
 import os
 import argparse
@@ -101,6 +93,33 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
     else:
         logger.warning(f"Unknown trigger: {trigger}")
 
+# --- Rebuild Logic for Full Rebuild ---
+async def rebuild_site(site: str):
+    configure_logger(site)
+    logger.info(f"Rebuilding site: {site}")
+
+    # Load site settings
+    settings = await SiteSettings(db).get(site)
+    
+    cleaner = clean_raw_record
+    translator = Translator(db)
+    calculator = Calculator(db, site)
+    processor = Processor(db, site)
+    queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
+
+    # Rebuilding: Iterate through all raw data and process it
+    cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
+    async for raw in cursor:
+        if await cleaner.is_valid(raw):
+            processed = await processor.process(raw, settings)
+            if processed:
+                changed, hash_groups, changed_fields = await processor.should_sync(processed)
+                if changed:
+                    await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": "full rebuild"})
+        else:
+            # Handle records that fail validation
+            logger.info(f"Excluded raw record with ad_id: {raw.get('ad_id', '')} during rebuild")
+
 # --- CLI wrapper for manual triggering ---
 async def run_cli():
     parser = argparse.ArgumentParser()
@@ -115,9 +134,9 @@ async def run_cli():
         count = await queue.retry_failed_jobs()
         logger.info(f"Retried {count} failed jobs for {args.site}")
     elif args.rebuild_site:
-        processor = Processor(db, args.site)
-        await processor.run()
-        logger.info(f"Re-evaluated all raw listings for site {args.site}")
+        # Handle full rebuild site trigger
+        await rebuild_site(args.site)
+        logger.info(f"Rebuild process completed for site {args.site}")
     elif args.trigger:
         await process_trigger(args.trigger, args.site, {})
     else:
