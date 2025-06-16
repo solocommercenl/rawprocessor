@@ -43,24 +43,23 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
     # Debugging: Log if site settings are correctly loaded
     logger.debug(f"Site settings loaded: {settings}")
 
-    # Check the data being passed to the trigger
     if trigger == "raw.insert":
         records = data.get("records", [])
         logger.debug(f"Trigger 'raw.insert': Found {len(records)} raw records.")
-        
+
         for raw in records:
             logger.debug(f"Processing raw record with ad_id={raw.get('ad_id', 'unknown')}")
-            
+
+            # Validate the raw record
             if not await cleaner.is_valid(raw):
                 logger.info(f"Excluded raw {raw.get('ad_id', '')} (failed cleaner)")
                 continue
 
             # Process the raw record
             processed = await processor.process(raw, settings)
-            if processed:
-                # Debugging: Check processed data before insertion
-                logger.debug(f"Processed data for ad_id={processed['im_ad_id']}")
+            logger.debug(f"Processed data for ad_id={processed.get('im_ad_id', 'unknown')}")
 
+            if processed:
                 # Insert processed data into processed_{site} first
                 await db[f"processed_{site}"].insert_one(processed)
                 logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
@@ -70,6 +69,8 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
                 if changed:
                     await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
                     logger.debug(f"Enqueued create job for ad_id={processed['im_ad_id']}")
+            else:
+                logger.debug(f"No processed data for ad_id={raw.get('ad_id', 'unknown')}")
 
     elif trigger == "raw.update" or trigger == "raw.update.im_price":
         record = data.get("record")
@@ -103,7 +104,6 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
         cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
         async for raw in cursor:
             logger.debug(f"Checking raw record with ad_id={raw.get('ad_id', 'unknown')} for filters")
-            
             if await cleaner.is_valid(raw):
                 processed = await processor.process(raw, settings)
                 if processed:
