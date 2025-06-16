@@ -30,6 +30,10 @@ db = client[DB_NAME]
 
 @log_exceptions
 async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None:
+    # Set logger level to DEBUG
+    logger.remove()  # Remove default handler
+    logger.add(sys.stdout, level="DEBUG")  # Add a new handler that logs to stdout at DEBUG level
+
     configure_logger(site)
     logger.info(f"Processing trigger: {trigger} for site {site}")
 
@@ -69,8 +73,6 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
                 if changed:
                     await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
                     logger.debug(f"Enqueued create job for ad_id={processed['im_ad_id']}")
-            else:
-                logger.debug(f"No processed data for ad_id={raw.get('ad_id', 'unknown')}")
 
     elif trigger == "raw.update" or trigger == "raw.update.im_price":
         record = data.get("record")
