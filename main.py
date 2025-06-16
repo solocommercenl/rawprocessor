@@ -40,6 +40,9 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
     processor = Processor(db, site)
     queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
 
+    # Create processed collection if not exists
+    await db.create_collection(f"processed_{site}", codec_options=None, capped=False, size=0)
+
     if trigger == "raw.insert":
         records = data.get("records", [])
         for raw in records:
