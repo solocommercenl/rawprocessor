@@ -46,8 +46,15 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
             if not await cleaner.is_valid(raw):
                 logger.info(f"Excluded raw {raw.get('ad_id', '')} (failed cleaner)")
                 continue
+
+            # Process the raw record
             processed = await processor.process(raw, settings)
             if processed:
+                # Insert processed data into processed_{site} first
+                await db[f"processed_{site}"].insert_one(processed)
+                logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
+
+                # Then enqueue the create job for WordPress
                 changed, hash_groups, changed_fields = await processor.should_sync(processed)
                 if changed:
                     await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
@@ -62,6 +69,11 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
             return
         processed = await processor.process(record, settings)
         if processed:
+            # Insert processed data into processed_{site} first
+            await db[f"processed_{site}"].insert_one(processed)
+            logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
+
+            # Then enqueue the update job for WordPress
             changed, hash_groups, changed_fields = await processor.should_sync(processed)
             if changed:
                 await queue.enqueue_job("update", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
@@ -81,6 +93,11 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
             if await cleaner.is_valid(raw):
                 processed = await processor.process(raw, settings)
                 if processed:
+                    # Insert processed data into processed_{site} first
+                    await db[f"processed_{site}"].insert_one(processed)
+                    logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
+
+                    # Then enqueue the create job for WordPress
                     changed, hash_groups, changed_fields = await processor.should_sync(processed)
                     if changed:
                         await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
