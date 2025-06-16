@@ -147,7 +147,7 @@ async def run_cli():
         count = await queue.retry_failed_jobs()
         logger.info(f"Retried {count} failed jobs for {args.site}")
     elif args.rebuild_site:
-        # **Directly handle rebuild-site trigger here**
+        # **Bypass process_trigger entirely and directly call rebuild_site**
         logger.info(f"Triggering full rebuild for site: {args.site}")
         await rebuild_site(args.site)
     elif args.trigger:
