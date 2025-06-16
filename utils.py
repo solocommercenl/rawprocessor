@@ -23,7 +23,7 @@ def calculate_hash_groups(doc: Dict[str, Any]) -> Dict[str, str]:
     Groups: pricing, leasing, gallery.
     """
     groups = {
-        "pricing": ["im_price", "im_nett_price", "im_bmp_rate", "im_vat_amount"],  # Fixed: bmp_rate
+        "pricing": ["im_price", "im_nett_price", "im_bpm_rate", "im_vat_amount"],
         "leasing": ["im_monthly_payment", "im_down_payment", "im_desired_remaining_debt"],
         "gallery": ["im_gallery"]
     }
@@ -106,10 +106,10 @@ async def get_depreciation_percentage(db: AsyncIOMotorDatabase, age_in_months: i
         logger.error("Error getting depreciation percentage: %s", ex)
         return 0.0
 
-# --- Mongo BMP Lookup (Fixed function name) ---
-async def get_bmp_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
+# --- Mongo BPM Lookup ---
+async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
     """
-    Get BMP entry from MongoDB lookup tables based on registration year and emissions.
+    Get BPM entry from MongoDB lookup tables based on registration year and emissions.
     """
     try:
         query = {"year": reg_year}
@@ -118,9 +118,9 @@ async def get_bmp_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
         if reg_year == 2020:
             query["half"] = "H1" if reg_month < 7 else "H2"
         
-        doc = await db.bmp_tables.find_one(query)  # Fixed: bmp_tables
+        doc = await db.bpm_tables.find_one(query)
         if not doc:
-            logger.warning("No BMP table found for year %s", reg_year)
+            logger.warning("No BPM table found for year %s", reg_year)
             return None
         
         # Find the emissions bracket
@@ -135,11 +135,11 @@ async def get_bmp_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
             if lower <= raw_emissions < upper:
                 return entry
         
-        logger.warning("No BMP entry found for emissions %s in year %s", raw_emissions, reg_year)
+        logger.warning("No BPM entry found for emissions %s in year %s", raw_emissions, reg_year)
         return None
         
     except Exception as ex:
-        logger.error("Error getting BMP entry: %s", ex)
+        logger.error("Error getting BPM entry: %s", ex)
         return None
 
 # --- Mongo PHEV Lookup ---
