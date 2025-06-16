@@ -4,7 +4,7 @@ import json
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from site_settings import SiteSettings
-from cleaner import Cleaner  # Ensure to await this
+from cleaner import Cleaner  # Correct import for Cleaner
 from translator import Translator
 from calculator import Calculator
 from processor import Processor
@@ -32,8 +32,13 @@ async def main():
         return
 
     settings = await SiteSettings(db).get(SITE)
-    # Ensure we await the clean_raw_record function
-    cleaned = await Cleaner(raw, db, f"[{SITE}]")
+    
+    # Instantiate the Cleaner class with db and site
+    cleaner = Cleaner(db, SITE)
+    
+    # Clean the raw record using the clean_raw_record method
+    cleaned = await cleaner.clean_raw_record(raw, f"[{SITE}]")
+    
     if not cleaned:
         print("Raw record failed cleaner and would be excluded.")
         return
