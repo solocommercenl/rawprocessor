@@ -34,7 +34,7 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
     logger.info(f"Processing trigger: {trigger} for site {site}")
 
     settings = await SiteSettings(db).get(site)
-    cleaner = Cleaner(db, site)
+    cleaner = clean_raw_record
     translator = Translator(db)
     calculator = Calculator(db, site)
     processor = Processor(db, site)
