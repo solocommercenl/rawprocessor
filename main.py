@@ -1,161 +1,305 @@
 """
 main.py
 
-Entrypoint and orchestrator for rawprocessor.
-Handles all triggers: raw insert/update, status change, site/translation updates, and batch jobs.
-Supports CLI for: --trigger --site, --retry-failed, --rebuild-site
+Entrypoint and orchestrator for rawprocessor Stage 1.
+Handles MongoDB change streams, manual triggers, and CLI operations.
+
+FIXED: Complete integration with corrected data mapping and trigger system.
 """
 
 import asyncio
 import os
-import sys  # Added sys import for logging configuration
+import sys
 import argparse
+import signal
 from typing import Any, Dict
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from loguru import logger
 
 from logger import configure_logger, log_exceptions
-from site_settings import SiteSettings
-from cleaner import Cleaner
-from translator import Translator
-from calculator import Calculator
-from processor import Processor
+from trigger_system import TriggerSystem
 from jobqueue import WPQueue
+from processor import Processor
 
+# Load environment
 load_dotenv()
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("MONGO_DB", "autodex")
+
+if not MONGO_URI:
+    raise ValueError("MONGO_URI environment variable required")
+
+# Global state
 client = AsyncIOMotorClient(MONGO_URI)
 db = client[DB_NAME]
+trigger_system = None
+shutdown_event = asyncio.Event()
+
+def setup_signal_handlers():
+    """Setup graceful shutdown signal handlers."""
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, initiating shutdown...")
+        shutdown_event.set()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
 @log_exceptions
-async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None:
-    # Set logger level to DEBUG
-    logger.remove()  # Remove default handler
-    logger.add(sys.stdout, level="DEBUG")  # Add a new handler that logs to stdout at DEBUG level
+async def start_daemon_mode():
+    """
+    Start the daemon mode with MongoDB change stream monitoring.
+    """
+    global trigger_system
+    
+    logger.info("Starting rawprocessor Stage 1 daemon...")
+    
+    try:
+        # Initialize trigger system
+        trigger_system = TriggerSystem(db)
+        await trigger_system.initialize()
+        
+        # Start change stream monitoring
+        monitor_task = asyncio.create_task(trigger_system.start_watching())
+        
+        # Wait for shutdown signal
+        await shutdown_event.wait()
+        
+        logger.info("Shutdown signal received, stopping daemon...")
+        
+        # Stop monitoring
+        await trigger_system.stop_watching()
+        monitor_task.cancel()
+        
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+            
+        logger.info("Daemon stopped gracefully")
+        
+    except Exception as ex:
+        logger.error(f"Error in daemon mode: {ex}")
+        raise
 
-    configure_logger(site)
-    logger.info(f"Processing trigger: {trigger} for site {site}")
+@log_exceptions  
+async def handle_manual_trigger(args):
+    """
+    Handle manual trigger execution.
+    """
+    global trigger_system
+    
+    if not trigger_system:
+        trigger_system = TriggerSystem(db)
+        await trigger_system.initialize()
+    
+    trigger_data = {}
+    if args.data:
+        import json
+        trigger_data = json.loads(args.data)
+    
+    await trigger_system.manual_trigger(args.trigger, args.site, trigger_data)
+    logger.info(f"Manual trigger '{args.trigger}' completed")
 
-    settings = await SiteSettings(db).get(site)
-    cleaner = Cleaner(db, site)
-    translator = Translator(db)
-    calculator = Calculator(db, site)
-    processor = Processor(db, site)
-    queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
+@log_exceptions
+async def handle_retry_failed(args):
+    """
+    Retry failed queue jobs for a site.
+    """
+    if not args.site:
+        raise ValueError("--site required for --retry-failed")
+    
+    queue = WPQueue(db, args.site)
+    count = await queue.retry_failed_jobs(limit=args.limit or 100)
+    logger.info(f"Retried {count} failed jobs for site '{args.site}'")
 
-    # Debugging: Log if site settings are correctly loaded
-    logger.debug(f"Site settings loaded: {settings}")
+@log_exceptions
+async def handle_rebuild_site(args):
+    """
+    Rebuild all records for a site.
+    """
+    if not args.site:
+        raise ValueError("--site required for --rebuild-site")
+    
+    global trigger_system
+    
+    if not trigger_system:
+        trigger_system = TriggerSystem(db)
+        await trigger_system.initialize()
+    
+    await trigger_system.manual_trigger("rebuild_site", args.site)
+    logger.info(f"Site rebuild completed for '{args.site}'")
 
-    if trigger == "raw.insert":
-        records = data.get("records", [])
-        logger.debug(f"Trigger 'raw.insert': Found {len(records)} raw records.")
+@log_exceptions
+async def handle_status():
+    """
+    Show system status.
+    """
+    global trigger_system
+    
+    if not trigger_system:
+        trigger_system = TriggerSystem(db)
+        await trigger_system.initialize()
+    
+    status = await trigger_system.get_system_status()
+    
+    print("=== Rawprocessor Stage 1 Status ===")
+    print(f"Running: {status['running']}")
+    print(f"Active Sites: {status['site_count']}")
+    print(f"Sites: {', '.join(status['active_sites'])}")
+    print(f"Timestamp: {status['timestamp']}")
+    
+    print("\n=== Queue Status ===")
+    for site, stats in status['queue_stats'].items():
+        if 'error' in stats:
+            print(f"{site}: ERROR - {stats['error']}")
+        else:
+            print(f"{site}: {stats['pending']} pending, {stats['failed']} failed")
 
-        for raw in records:
-            logger.debug(f"Processing raw record with ad_id={raw.get('ad_id', 'unknown')}")
-
-            # Validate the raw record
-            if not await cleaner.is_valid(raw):
-                logger.info(f"Excluded raw {raw.get('ad_id', '')} (failed cleaner)")
-                continue
-
-            # Process the raw record
-            processed = await processor.process(raw, settings)
-            logger.debug(f"Processed data for ad_id={processed.get('im_ad_id', 'unknown')}")
-
-            if processed:
-                # Insert processed data into processed_{site} first
-                await db[f"processed_{site}"].insert_one(processed)
-                logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
-
-                # Then enqueue the create job for WordPress
-                changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                if changed:
-                    await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-                    logger.debug(f"Enqueued create job for ad_id={processed['im_ad_id']}")
-
-    elif trigger == "raw.update" or trigger == "raw.update.im_price":
-        record = data.get("record")
-        if not record:
-            logger.warning(f"No record in payload for trigger {trigger}")
-            return
-        if not await cleaner.is_valid(record):
-            logger.info(f"Excluded raw {record.get('ad_id', '')} (failed cleaner)")
-            return
-        processed = await processor.process(record, settings)
-        if processed:
-            # Insert processed data into processed_{site} first
-            await db[f"processed_{site}"].insert_one(processed)
-            logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
-
-            # Then enqueue the update job for WordPress
-            changed, hash_groups, changed_fields = await processor.should_sync(processed)
-            if changed:
-                await queue.enqueue_job("update", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-
-    elif trigger == "raw.update.im_status_false":
-        record = data.get("record")
-        if not record:
-            logger.warning("No record found in data for raw.update.im_status_false")
-            return
-        processed = await processor.process(record, settings)
-        if processed:
-            await queue.enqueue_job("unpublish", processed["im_ad_id"], None, ["status"], {}, meta={"reason": trigger})
-
-    elif trigger == "site_settings.filters_changed":
-        cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
-        async for raw in cursor:
-            logger.debug(f"Checking raw record with ad_id={raw.get('ad_id', 'unknown')} for filters")
-            if await cleaner.is_valid(raw):
-                processed = await processor.process(raw, settings)
-                if processed:
-                    # Insert processed data into processed_{site} first
-                    await db[f"processed_{site}"].insert_one(processed)
-                    logger.info(f"Inserted processed data into processed_{site} for ad_id={processed['im_ad_id']}")
-
-                    # Then enqueue the create job for WordPress
-                    changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                    if changed:
-                        await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-            else:
-                processed_doc = await db[f"processed_{site}"].find_one({"im_ad_id": raw.get("im_ad_id")})
-                if processed_doc and processed_doc.get("im_status", True):
-                    await queue.enqueue_job("unpublish", processed_doc["im_ad_id"], None, ["status"], {}, meta={"reason": "filters_changed → excluded"})
-
-    elif trigger == "site_settings.pricing_changed" or trigger == "weekly_scheduled_job":
-        cursor = db[f"processed_{site}"].find({})
-        async for doc in cursor:
-            processed = await processor.process(doc, settings)
-            if processed:
-                changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                if changed:
-                    await queue.enqueue_job("update", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": trigger})
-
+@log_exceptions
+async def handle_test_one(args):
+    """
+    Test processing of a single raw record.
+    """
+    if not args.site:
+        raise ValueError("--site required for --test-one")
+    
+    from site_settings import SiteSettings
+    from cleaner import Cleaner
+    import json
+    
+    # Get one raw record
+    if args.car_id:
+        raw = await db.raw.find_one({"car_id": args.car_id})
     else:
-        logger.warning(f"Unknown trigger: {trigger}")
+        raw = await db.raw.find_one({"listing_status": True})
+    
+    if not raw:
+        print("No raw record found")
+        return
+    
+    print(f"Testing record: {raw.get('car_id', 'unknown')}")
+    
+    # Load site settings
+    site_settings = await SiteSettings(db).get(args.site)
+    
+    # Test cleaning
+    cleaner = Cleaner(db, args.site)
+    cleaned = await cleaner.clean_raw_record(raw, f"[{args.site}]")
+    
+    if not cleaned:
+        print("❌ Record failed cleaning validation")
+        return
+    
+    print("✅ Record passed cleaning validation")
+    
+    # Test site filter check
+    site_filters = site_settings.get("filter_criteria", {})
+    processable = await cleaner.is_record_processable_for_site(cleaned, site_filters, f"[{args.site}]")
+    
+    if not processable:
+        print("❌ Record excluded by site filters")
+        return
+    
+    print("✅ Record passed site filters")
+    
+    # Test full processing
+    processor = Processor(db, args.site)
+    processed = await processor.process_single_record(cleaned, site_settings)
+    
+    if not processed:
+        print("❌ Processing returned None")
+        return
+    
+    print("✅ Processing successful")
+    print("\nProcessed output:")
+    print(json.dumps(processed, indent=2, default=str))
 
-# --- CLI wrapper for manual triggering ---
-async def run_cli():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--site", required=True)
-    parser.add_argument("--trigger")
-    parser.add_argument("--retry-failed", action="store_true")
-    parser.add_argument("--rebuild-site", action="store_true")
+async def main():
+    """
+    Main entry point - parse arguments and route to appropriate handler.
+    """
+    parser = argparse.ArgumentParser(
+        description="Rawprocessor Stage 1 - MongoDB to WordPress Data Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Start daemon mode (production)
+  python main.py --daemon
+  
+  # Manual triggers
+  python main.py --trigger site_settings.filters_changed --site solostaging
+  python main.py --trigger weekly_scheduled_job
+  
+  # Maintenance operations  
+  python main.py --rebuild-site solostaging
+  python main.py --retry-failed --site solostaging --limit 50
+  
+  # Testing and monitoring
+  python main.py --test-one --site solostaging --car-id "7ade-23a6-1e5e"
+  python main.py --status
+        """
+    )
+    
+    # Mode selection
+    parser.add_argument("--daemon", action="store_true", help="Start daemon mode (MongoDB change streams)")
+    parser.add_argument("--trigger", help="Manual trigger type")
+    parser.add_argument("--rebuild-site", action="store_true", help="Rebuild all records for a site")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry failed queue jobs")
+    parser.add_argument("--status", action="store_true", help="Show system status")
+    parser.add_argument("--test-one", action="store_true", help="Test processing of one record")
+    
+    # Parameters
+    parser.add_argument("--site", help="Site to operate on")
+    parser.add_argument("--car-id", help="Specific car ID for testing")
+    parser.add_argument("--data", help="JSON data for manual triggers")
+    parser.add_argument("--limit", type=int, help="Limit for batch operations")
+    
+    # Logging
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    
     args = parser.parse_args()
-
-    if args.retry_failed:
-        queue = WPQueue(db, args.site)
-        count = await queue.retry_failed_jobs()
-        logger.info(f"Retried {count} failed jobs for {args.site}")
-    elif args.rebuild_site:
-        processor = Processor(db, args.site)
-        await processor.run()
-        logger.info(f"Re-evaluated all raw listings for site {args.site}")
-    elif args.trigger:
-        await process_trigger(args.trigger, args.site, {})
-    else:
-        logger.error("Missing --trigger or --rebuild-site or --retry-failed")
+    
+    # Configure logging
+    log_site = args.site or "system"
+    configure_logger(log_site)
+    
+    # Set log level
+    logger.remove()
+    logger.add(sys.stdout, level=args.log_level)
+    if args.site:
+        logger.add(f"./logs/{args.site}.log", rotation="10 MB", retention="7 days", level=args.log_level)
+    
+    # Setup signal handlers for daemon mode
+    if args.daemon:
+        setup_signal_handlers()
+    
+    try:
+        # Route to appropriate handler
+        if args.daemon:
+            await start_daemon_mode()
+        elif args.trigger:
+            await handle_manual_trigger(args)
+        elif args.rebuild_site:
+            await handle_rebuild_site(args)
+        elif args.retry_failed:
+            await handle_retry_failed(args)
+        elif args.status:
+            await handle_status()
+        elif args.test_one:
+            await handle_test_one(args)
+        else:
+            parser.print_help()
+            
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as ex:
+        logger.error(f"Fatal error: {ex}")
+        sys.exit(1)
+    finally:
+        # Cleanup
+        if client:
+            client.close()
 
 if __name__ == "__main__":
-    asyncio.run(run_cli())
+    asyncio.run(main())

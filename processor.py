@@ -7,136 +7,242 @@ from loguru import logger
 
 from translator import Translator
 from calculator import Calculator
-from site_settings import SiteSettings
+from site_settings import SiteSettings  
 from jobqueue import WPQueue
-from utils import calculate_hash_groups
+from utils import calculate_hash_groups, normalize_gallery
 from cleaner import Cleaner
-
-REQUIRED_RAW_FIELDS = ["price", "registration", "Fueltype", "raw_emissions", "Images"]
 
 class Processor:
     def __init__(self, db: AsyncIOMotorDatabase, site: str):
         self.db = db
         self.site = site
+        self.cleaner = Cleaner(db, site)
         self.translator = Translator(db)
         self.calculator: Optional[Calculator] = None
         self.processed_collection = db[f"processed_{site}"]
         self.queue_collection = db[f"wp_sync_queue_{site}"]
 
     async def run(self):
+        """
+        Process all raw records for this site (used for rebuild operations).
+        """
         settings = await SiteSettings(self.db).get(self.site)
         self.calculator = Calculator(self.db, settings)
         filters = settings.get("filter_criteria", {})
+        
+        # Find all active raw records
         cursor = self.db.raw.find({"listing_status": True, **filters})
+        processed_count = 0
+        skipped_count = 0
+
+        logger.info(f"[{self.site}] Starting bulk processing of raw records")
 
         async for raw in cursor:
-            cleaned = clean_raw_record(raw, f"[{self.site}]")
+            try:
+                processed = await self.process_single_record(raw, settings)
+                if processed:
+                    processed_count += 1
+                    logger.debug(f"[{self.site}] Processed record {processed['im_ad_id']}")
+                else:
+                    skipped_count += 1
+                    
+            except Exception as ex:
+                logger.error(f"[{self.site}] Error processing record {raw.get('_id')}: {ex}")
+                skipped_count += 1
+
+        logger.info(f"[{self.site}] Bulk processing complete: {processed_count} processed, {skipped_count} skipped")
+
+    async def process_single_record(self, raw: dict, site_settings: dict) -> Optional[dict]:
+        """
+        Process a single raw record through the complete pipeline.
+        """
+        record_id = raw.get("_id") or raw.get("car_id") or "unknown" 
+        
+        try:
+            # Step 1: Clean and validate the raw record
+            cleaned = await self.cleaner.clean_raw_record(raw, f"[{self.site}]")
             if not cleaned:
-                continue
-            if not self._has_required_fields(cleaned):
-                logger.warning(f"[SKIP] {raw.get('_id')} - Missing required raw fields")
-                continue
-            processed = await self.process(cleaned, settings)
+                logger.debug(f"[{self.site}] Record failed cleaning: {record_id}")
+                return None
+
+            # Step 2: Check if record should be processed for this site
+            site_filters = site_settings.get("filter_criteria", {})
+            if not await self.cleaner.is_record_processable_for_site(cleaned, site_filters, f"[{self.site}]"):
+                logger.debug(f"[{self.site}] Record excluded by site filters: {record_id}")
+                return None
+
+            # Step 3: Process the record
+            processed = await self.process(cleaned, site_settings)
             if not processed:
-                continue
-            changed, hash_groups, changed_fields = await self.should_sync(processed)
-            if not changed:
-                logger.info(f"[NOCHANGE] {processed['im_ad_id']} - No field group changed")
-                continue
+                logger.debug(f"[{self.site}] Processing returned None: {record_id}")
+                return None
 
-            await self.processed_collection.update_one(
-                {"im_ad_id": processed["im_ad_id"]}, {"$set": processed}, upsert=True
-            )
+            # Step 4: Store in processed collection and queue sync if needed
+            await self._store_and_queue_if_changed(processed)
+            
+            return processed
 
-            queue = WPQueue(self.db, self.site)
-            await queue.enqueue_job(
-                action="create" if processed.get("_is_new") else "update",
-                ad_id=processed["im_ad_id"],
-                post_id=None,
-                changed_fields=changed_fields,
-                hash_groups=hash_groups,
-                meta={"origin": "processor.run"}
-            )
+        except Exception as ex:
+            logger.error(f"[{self.site}] Error in process_single_record for {record_id}: {ex}")
+            return None
 
     async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
+        """
+        Transform a cleaned raw record into a processed record ready for WordPress.
+        """
         if self.calculator is None:
             self.calculator = Calculator(self.db, site_settings)
 
-        # Translate fields using the Translator class for required fields
-        translated = await self.translator.translate_fields(raw, site_settings, raw.get("_id"), self.site)
-        if not translated:
-            logger.warning(f"[SKIP] {raw.get('_id')} - Translation failed or incomplete")
+        record_id = raw.get("_id") or raw.get("car_id") or "unknown"
+
+        try:
+            # Step 1: Translate fields
+            translated = await self.translator.translate_fields(raw, site_settings, record_id, self.site)
+            
+            # Step 2: Calculate financials 
+            vated = bool(raw.get("vatded", False))  # vatded field from raw
+            financials = await self.calculator.calculate_financials(raw, vated)
+
+            # Step 3: Build the processed document matching your target structure
+            doc = await self._build_processed_document(raw, translated, financials)
+            
+            # Step 4: Check if this is a new record
+            existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
+            doc["_is_new"] = not bool(existing)
+            
+            # Step 5: Calculate hash groups for change detection
+            doc["hashes"] = calculate_hash_groups(doc)
+            
+            logger.debug(f"[{self.site}] Successfully processed record: {record_id}")
+            return doc
+
+        except Exception as ex:
+            logger.error(f"[{self.site}] Error processing record {record_id}: {ex}")
             return None
 
-        vated = str(raw.get("vatded", "false")).lower() == "true"
-        financials = await self.calculator.calculate_financials(raw, vated)
-
-        # Explicit field mapping to JetEngine/processed fields
+    async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
+        """
+        Build the complete processed document matching the target structure.
+        """
         doc: Dict[str, Any] = {}
 
-        # --- Combined Block for Meta and Taxonomy Fields ---
+        # === CORE IDENTIFIERS ===
         doc["im_ad_id"] = raw.get("car_id", "")
         
-        # Construct im_title as make + model + modelVersion
-        make_model = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Make + Model from raw data
-        model_version = raw.get("title", "")  # Assuming title has the model version
-        doc["im_title"] = f"{make_model} {model_version}".strip()  # Combine make + model + version
-
-        doc["im_gallery"] = "|".join(raw.get("Images", [])) if isinstance(raw.get("Images"), list) else (raw.get("Images") or "")
-        doc["im_featured_image"] = raw.get("Images", [""])[0] if raw.get("Images") else ""  # Featured image
-        doc["im_price_org"] = round(float(raw.get("price", 0)), 2)  # Derived from price
-        doc["im_registration_year"] = str(raw.get("registration_year", "")) or str(raw.get("im_registration_year", "")) 
+        # === TITLE (Brand + Model + Title) ===
+        make = raw.get("brand", "")
+        model = raw.get("model", "")  
+        title_suffix = raw.get("title", "")
+        doc["im_title"] = f"{make} {model} {title_suffix}".strip()
+        
+        # === GALLERY AND FEATURED IMAGE ===
+        images = normalize_gallery(raw.get("Images", []))
+        doc["im_gallery"] = "|".join(images) if images else ""
+        doc["im_featured_image"] = images[0] if images else ""
+        
+        # === BASIC VEHICLE DATA ===
+        doc["im_price_org"] = round(float(raw.get("price", 0)), 2)
+        doc["im_registration_year"] = str(raw.get("registration_year", ""))
         doc["im_first_registration"] = raw.get("registration", "")
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
+        
+        # === APPEARANCE DATA ===
         doc["im_upholstery"] = raw.get("colourandupholstery", {}).get("Upholstery", "")
         doc["im_manufacturer_color"] = raw.get("colourandupholstery", {}).get("Manufacturercolour", "")
         doc["im_paint_type"] = raw.get("colourandupholstery", {}).get("Paint", "")
+        
+        # === DEALER DATA ===  
         doc["im_dealer_company"] = raw.get("dealer_company", "")
         doc["im_dealer_contact"] = raw.get("dealer_contact", "")
         doc["im_dealer_phone"] = raw.get("dealer_phone", "")
         doc["im_dealer_city"] = raw.get("dealer_city", "")
         doc["im_product_url"] = raw.get("Product_URL", "")
+        
+        # === VEHICLE SPECIFICATIONS ===
+        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", 0)
+        doc["im_body_type"] = raw.get("Basicdata", {}).get("Body", "")
+        doc["im_gearbox"] = raw.get("gearbox", "")
+        doc["im_make_model"] = f"{make} {model}".strip()
+        
+        # === EMISSIONS AND VAT ===
+        doc["im_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
+        doc["im_vat_deductible"] = bool(raw.get("vatded", False))
+        
+        # === TAXONOMIES (for WordPress) ===
+        doc["make"] = make
+        doc["model"] = model  
+        doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")
+        
+        # === STATUS AND TIMESTAMPS ===
         doc["im_status"] = True
         doc["updated_at"] = datetime.utcnow()
-
-        # --- Handle Missing Fields ---
-        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", 0)  # Seats field from Basicdata
-        doc["im_body_type"] = raw.get("Basicdata", {}).get("Body", "")  # Body type from Basicdata
-        doc["im_gearbox"] = raw.get("gearbox", "")  # Gearbox from raw
-        doc["im_make_model"] = f"{raw.get('brand', '')} {raw.get('model', '')}".strip()  # Combined make/model
-
-        # --- Taxonomy Fields ---
-        doc["make"] = raw.get("brand", "")  # Make as taxonomy
-        doc["model"] = raw.get("model", "")  # Model as taxonomy
-        doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")  # Color as taxonomy
-
-        # --- Add translated and calculated fields ---
-        doc.update(translated)  # Ensure translated fields are merged with the doc
-        for k, v in financials.items():
-            if isinstance(v, float):
-                doc[k] = int(round(v, 0))  # Round all financial fields to integers (no decimals)
+        
+        # === ADD TRANSLATED FIELDS ===
+        for key, value in translated.items():
+            doc[key] = value
+        
+        # === ADD FINANCIAL CALCULATIONS (rounded to integers) ===
+        for key, value in financials.items():
+            if isinstance(value, float):
+                doc[key] = int(round(value, 0))  # Round to integers as per your example
             else:
-                doc[k] = v
-
-        # --- Raw Emissions and VAT Deductible ---
-        doc["im_raw_emissions"] = raw.get("raw_emissions") or raw.get("energyconsumption", {}).get("raw_emissions")
-        doc["im_vat_deductible"] = raw.get("vatded", False)  # No condition, pass as is
-
-        existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
-        doc["_is_new"] = not bool(existing)
-        doc["hashes"] = calculate_hash_groups(doc)
+                doc[key] = value
+                
         return doc
 
     async def should_sync(self, processed_doc: dict) -> Tuple[bool, Dict[str, str], List[str]]:
+        """
+        Determine if a processed record should be synced to WordPress based on hash comparison.
+        """
         current_hashes = processed_doc.get("hashes", {})
         existing = await self.processed_collection.find_one({"im_ad_id": processed_doc["im_ad_id"]})
+        
         if not existing:
+            # New record - sync all hash groups
             return True, current_hashes, list(current_hashes.keys())
 
+        # Compare hashes to find what changed
         old_hashes = existing.get("hashes", {})
-        changed = [k for k in current_hashes if old_hashes.get(k) != current_hashes[k]]
-        return (bool(changed), current_hashes, changed)
+        changed_groups = [
+            group for group in current_hashes 
+            if old_hashes.get(group) != current_hashes[group]
+        ]
+        
+        return bool(changed_groups), current_hashes, changed_groups
 
-    def _has_required_fields(self, raw: Dict[str, Any]) -> bool:
-        return all(field in raw and raw[field] not in [None, ""] for field in REQUIRED_RAW_FIELDS)
+    async def _store_and_queue_if_changed(self, processed: dict) -> None:
+        """
+        Store processed record and queue WordPress sync if changes detected.
+        """
+        try:
+            # Check what changed
+            changed, hash_groups, changed_fields = await self.should_sync(processed)
+            
+            # Store the processed record
+            await self.processed_collection.update_one(
+                {"im_ad_id": processed["im_ad_id"]}, 
+                {"$set": processed}, 
+                upsert=True
+            )
+            
+            # Queue sync job if changes detected
+            if changed:
+                queue = WPQueue(self.db, self.site)
+                action = "create" if processed.get("_is_new") else "update"
+                
+                await queue.enqueue_job(
+                    action=action,
+                    ad_id=processed["im_ad_id"],
+                    post_id=None,  # Stage 2 will fill this
+                    changed_fields=changed_fields,
+                    hash_groups=hash_groups,
+                    meta={"processed_at": datetime.utcnow().isoformat()}
+                )
+                
+                logger.info(f"[{self.site}] Queued {action} job for {processed['im_ad_id']}, fields: {changed_fields}")
+            else:
+                logger.debug(f"[{self.site}] No changes detected for {processed['im_ad_id']}")
+                
+        except Exception as ex:
+            logger.error(f"[{self.site}] Error storing/queueing record {processed.get('im_ad_id')}: {ex}")
