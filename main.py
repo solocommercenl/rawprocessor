@@ -43,17 +43,14 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
     # Debugging: Log if site settings are correctly loaded
     logger.debug(f"Site settings loaded: {settings}")
 
-    # Create processed collection if not exists
-    # No need to explicitly create the collection as MongoDB will auto-create it on first insert
-    logger.debug(f"Checking for 'processed_{site}' collection...")
-
+    # Check the data being passed to the trigger
     if trigger == "raw.insert":
         records = data.get("records", [])
-        logger.debug(f"Found {len(records)} raw records to process.")
+        logger.debug(f"Trigger 'raw.insert': Found {len(records)} raw records.")
         
         for raw in records:
             logger.debug(f"Processing raw record with ad_id={raw.get('ad_id', 'unknown')}")
-
+            
             if not await cleaner.is_valid(raw):
                 logger.info(f"Excluded raw {raw.get('ad_id', '')} (failed cleaner)")
                 continue
@@ -105,6 +102,8 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
     elif trigger == "site_settings.filters_changed":
         cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
         async for raw in cursor:
+            logger.debug(f"Checking raw record with ad_id={raw.get('ad_id', 'unknown')} for filters")
+            
             if await cleaner.is_valid(raw):
                 processed = await processor.process(raw, settings)
                 if processed:
