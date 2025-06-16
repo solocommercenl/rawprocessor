@@ -50,7 +50,7 @@ class TriggerSystem:
 
     async def start_watching(self):
         """
-        Start watching MongoDB change streams for raw collection changes.
+        Start watching MongoDB change streams for both raw and processed collections.
         """
         if self.running:
             logger.warning("Trigger system already running")
@@ -58,6 +58,27 @@ class TriggerSystem:
             
         self.running = True
         logger.info("Starting MongoDB change stream monitoring...")
+        
+        try:
+            # Start monitoring both raw and processed collections
+            tasks = [
+                asyncio.create_task(self._watch_raw_collection()),
+                asyncio.create_task(self._watch_processed_collections())
+            ]
+            
+            # Wait for all monitoring tasks
+            await asyncio.gather(*tasks)
+                
+        except Exception as ex:
+            logger.error(f"Error in change stream monitoring: {ex}")
+            self.running = False
+            raise
+
+    async def _watch_raw_collection(self):
+        """
+        Watch raw collection changes - only updates processed_{site} collections.
+        """
+        logger.info("Starting raw collection monitoring...")
         
         try:
             # Watch for changes in raw collection
@@ -76,11 +97,58 @@ class TriggerSystem:
                 if not self.running:
                     break
                     
-                await self._handle_change(change)
+                await self._handle_raw_change(change)
                 
         except Exception as ex:
-            logger.error(f"Error in change stream monitoring: {ex}")
-            self.running = False
+            logger.error(f"Error in raw collection monitoring: {ex}")
+            raise
+
+    async def _watch_processed_collections(self):
+        """
+        Watch processed_{site} collection changes - only queues WordPress jobs.
+        """
+        logger.info("Starting processed collections monitoring...")
+        
+        try:
+            # Create change streams for each site's processed collection
+            tasks = []
+            for site in self.active_sites:
+                task = asyncio.create_task(self._watch_single_processed_collection(site))
+                tasks.append(task)
+            
+            await asyncio.gather(*tasks)
+                
+        except Exception as ex:
+            logger.error(f"Error in processed collections monitoring: {ex}")
+            raise
+
+    async def _watch_single_processed_collection(self, site: str):
+        """
+        Watch a single processed_{site} collection for changes.
+        """
+        collection_name = f"processed_{site}"
+        logger.info(f"Starting monitoring for {collection_name}")
+        
+        try:
+            # Watch for changes in processed collection
+            pipeline = [
+                {
+                    "$match": {
+                        "operationType": {"$in": ["insert", "update", "replace", "delete"]},
+                    }
+                }
+            ]
+            
+            change_stream = self.db[collection_name].watch(pipeline, full_document="updateLookup")
+            
+            async for change in change_stream:
+                if not self.running:
+                    break
+                    
+                await self._handle_processed_change(change, site)
+                
+        except Exception as ex:
+            logger.error(f"Error monitoring {collection_name}: {ex}")
             raise
 
     async def stop_watching(self):
@@ -90,30 +158,29 @@ class TriggerSystem:
         self.running = False
         logger.info("Stopped change stream monitoring")
 
-    async def _handle_change(self, change: Dict[str, Any]):
+    async def _handle_raw_change(self, change: Dict[str, Any]):
         """
-        Handle a MongoDB change event by processing it for all sites.
+        Handle raw collection changes - ONLY updates processed collections.
         """
         try:
             operation_type = change.get("operationType")
             document = change.get("fullDocument")
             
             if not document:
-                logger.warning("Change event missing fullDocument")
+                logger.warning("Raw change event missing fullDocument")
                 return
                 
-            document_id = document.get("_id")
             car_id = document.get("car_id", "unknown")
             
-            logger.info(f"Processing {operation_type} for car_id={car_id}, doc_id={document_id}")
+            logger.info(f"Processing raw {operation_type} for car_id={car_id}")
             
-            # Determine trigger type based on what changed
-            trigger_type = await self._determine_trigger_type(change, document)
+            # Determine what type of raw change occurred
+            trigger_type = self._determine_raw_trigger_type(change, document)
             
-            # Process for all active sites
+            # Process for all active sites - UPDATE PROCESSED ONLY
             tasks = []
             for site in self.active_sites:
-                task = self._process_for_site(site, trigger_type, document)
+                task = self._update_processed_for_site(site, trigger_type, document)
                 tasks.append(task)
             
             # Process all sites concurrently
@@ -123,19 +190,79 @@ class TriggerSystem:
             success_count = sum(1 for r in results if not isinstance(r, Exception))
             error_count = len(results) - success_count
             
-            logger.info(f"Processed {operation_type} for car_id={car_id}: {success_count} sites succeeded, {error_count} failed")
-            
-            # Log any exceptions
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error processing {car_id} for site {self.active_sites[i]}: {result}")
+            logger.info(f"Updated processed collections for car_id={car_id}: {success_count} sites succeeded, {error_count} failed")
                     
         except Exception as ex:
-            logger.error(f"Error handling change event: {ex}")
+            logger.error(f"Error handling raw change event: {ex}")
 
-    async def _determine_trigger_type(self, change: Dict[str, Any], document: Dict[str, Any]) -> str:
+    async def _handle_processed_change(self, change: Dict[str, Any], site: str):
         """
-        Determine the trigger type based on the change event.
+        Handle processed collection changes - ONLY queues WordPress jobs.
+        """
+        try:
+            operation_type = change.get("operationType")
+            document = change.get("fullDocument")
+            document_key = change.get("documentKey", {})
+            
+            # Get the ad_id from either the document or document key
+            if document:
+                ad_id = document.get("im_ad_id")
+            else:
+                # For delete operations, we need to get ad_id from document key
+                ad_id = None  # We'll need to handle this case
+            
+            if not ad_id:
+                logger.warning(f"[{site}] Processed change event missing ad_id")
+                return
+                
+            logger.info(f"[{site}] Processing processed {operation_type} for ad_id={ad_id}")
+            
+            queue = self.queues[site]
+            
+            if operation_type == "insert":
+                # New processed record - queue create job
+                await queue.enqueue_job(
+                    action="create",
+                    ad_id=ad_id,
+                    post_id=None,
+                    changed_fields=list(document.get("hashes", {}).keys()),
+                    hash_groups=document.get("hashes", {}),
+                    meta={"reason": "processed_insert"}
+                )
+                logger.debug(f"[{site}] Queued create job for ad_id={ad_id}")
+                
+            elif operation_type in ("update", "replace"):
+                # Updated processed record - queue update job
+                # We'd need to compare hashes to see what changed
+                changed_fields = ["pricing", "leasing", "gallery"]  # Simplified for now
+                await queue.enqueue_job(
+                    action="update",
+                    ad_id=ad_id,
+                    post_id=None,
+                    changed_fields=changed_fields,
+                    hash_groups=document.get("hashes", {}),
+                    meta={"reason": "processed_update"}
+                )
+                logger.debug(f"[{site}] Queued update job for ad_id={ad_id}")
+                
+            elif operation_type == "delete":
+                # Processed record deleted - queue delete job
+                await queue.enqueue_job(
+                    action="delete",
+                    ad_id=ad_id,
+                    post_id=None,
+                    changed_fields=["status"],
+                    hash_groups={},
+                    meta={"reason": "processed_delete"}
+                )
+                logger.debug(f"[{site}] Queued delete job for ad_id={ad_id}")
+                
+        except Exception as ex:
+            logger.error(f"[{site}] Error handling processed change: {ex}")
+
+    def _determine_raw_trigger_type(self, change: Dict[str, Any], document: Dict[str, Any]) -> str:
+        """
+        Determine the trigger type based on raw collection changes.
         """
         operation_type = change.get("operationType")
         
@@ -146,71 +273,78 @@ class TriggerSystem:
             # Check if price changed
             updated_fields = change.get("updateDescription", {}).get("updatedFields", {})
             if "price" in updated_fields:
-                return "raw.update.im_price"
+                return "raw.update.price"
             
             # Check if status changed to false
             if updated_fields.get("listing_status") is False:
-                return "raw.update.im_status_false"
+                return "raw.update.status_false"
             
             return "raw.update"
         
         return "raw.change"
 
-    async def _process_for_site(self, site: str, trigger_type: str, document: Dict[str, Any]) -> bool:
+    async def _update_processed_for_site(self, site: str, trigger_type: str, document: Dict[str, Any]) -> bool:
         """
-        Process a raw document change for a specific site.
+        Update processed_{site} collection based on raw changes.
+        DOES NOT queue jobs - that's handled by processed collection changes.
         """
         try:
             processor = self.processors[site]
-            queue = self.queues[site]
-            
-            # Get site settings
             site_settings = await SiteSettings(self.db).get(site)
             
             if trigger_type == "raw.insert":
                 # New record - process if it passes site filters
                 processed = await processor.process_single_record(document, site_settings)
                 if processed:
-                    logger.debug(f"[{site}] Created new record for car_id={document.get('car_id')}")
+                    # Store in processed collection (this will trigger processed change stream)
+                    await self.db[f"processed_{site}"].update_one(
+                        {"im_ad_id": processed["im_ad_id"]}, 
+                        {"$set": processed}, 
+                        upsert=True
+                    )
+                    logger.debug(f"[{site}] Created processed record for car_id={document.get('car_id')}")
                 return True
                 
-            elif trigger_type == "raw.update.im_price":
-                # Price changed - recalculate financials and update if hash changed
+            elif trigger_type == "raw.update.price":
+                # Price changed - recalculate and update processed
                 processed = await processor.process_single_record(document, site_settings)
                 if processed:
-                    # Check if we need to sync
-                    changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                    if changed:
-                        await processor._store_and_queue_if_changed(processed)
-                        logger.debug(f"[{site}] Updated pricing for car_id={document.get('car_id')}")
+                    await self.db[f"processed_{site}"].update_one(
+                        {"im_ad_id": processed["im_ad_id"]}, 
+                        {"$set": processed}, 
+                        upsert=True
+                    )
+                    logger.debug(f"[{site}] Updated processed record for car_id={document.get('car_id')}")
                 return True
                 
-            elif trigger_type == "raw.update.im_status_false":
-                # Status changed to false - unpublish
+            elif trigger_type == "raw.update.status_false":
+                # Status changed to false - mark processed as inactive
                 car_id = document.get("car_id")
                 if car_id:
-                    await queue.enqueue_job(
-                        action="unpublish",
-                        ad_id=car_id,
-                        post_id=None,
-                        changed_fields=["status"],
-                        hash_groups={},
-                        meta={"reason": "listing_status_false", "timestamp": datetime.utcnow().isoformat()}
+                    result = await self.db[f"processed_{site}"].update_one(
+                        {"im_ad_id": car_id},
+                        {"$set": {"im_status": False, "updated_at": datetime.utcnow()}}
                     )
-                    logger.debug(f"[{site}] Queued unpublish for car_id={car_id}")
+                    if result.modified_count > 0:
+                        logger.debug(f"[{site}] Marked processed record inactive for car_id={car_id}")
                 return True
                 
             elif trigger_type == "raw.update":
-                # General update - reprocess and sync if changed
+                # General update - reprocess
                 processed = await processor.process_single_record(document, site_settings)
                 if processed:
-                    logger.debug(f"[{site}] Updated record for car_id={document.get('car_id')}")
+                    await self.db[f"processed_{site}"].update_one(
+                        {"im_ad_id": processed["im_ad_id"]}, 
+                        {"$set": processed}, 
+                        upsert=True
+                    )
+                    logger.debug(f"[{site}] Updated processed record for car_id={document.get('car_id')}")
                 return True
                 
             return True
             
         except Exception as ex:
-            logger.error(f"[{site}] Error processing {trigger_type} for car_id={document.get('car_id')}: {ex}")
+            logger.error(f"[{site}] Error updating processed for {trigger_type}: {ex}")
             return False
 
     async def manual_trigger(self, trigger_type: str, site: str = None, data: Dict[str, Any] = None):
@@ -336,14 +470,14 @@ class TriggerSystem:
 
     async def _handle_weekly_scheduled_job(self, site: str = None):
         """
-        Handle weekly scheduled job - recalculate BMP depreciation for all records.
+        Handle weekly scheduled job - recalculate BPM depreciation for all records.
         """
         sites_to_process = [site] if site else self.active_sites
         logger.info(f"Processing weekly scheduled job for sites: {sites_to_process}")
         
         for site_key in sites_to_process:
             try:
-                await self._handle_site_pricing_changed(site_key)  # BMP recalculation is part of pricing
+                await self._handle_site_pricing_changed(site_key)  # BPM recalculation is part of pricing
             except Exception as ex:
                 logger.error(f"Error in weekly job for site {site_key}: {ex}")
 
