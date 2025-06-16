@@ -158,7 +158,10 @@ async def run_cli():
         logger.info(f"Triggering full rebuild for site: {args.site}")
         await rebuild_site(args.site)  # This will skip process_trigger entirely
     elif args.trigger:
-        await process_trigger(args.trigger, args.site, {})
+        if args.trigger != "rebuild-site":  # Make sure rebuild-site never gets to process_trigger
+            await process_trigger(args.trigger, args.site, {})
+        else:
+            logger.warning("The 'rebuild-site' trigger should not be passed to process_trigger.")
     else:
         logger.error("Missing --trigger or --rebuild-site or --retry-failed")
 
