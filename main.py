@@ -8,6 +8,7 @@ Supports CLI for: --trigger --site, --retry-failed, --rebuild-site
 
 import asyncio
 import os
+import sys  # Added sys import for logging configuration
 import argparse
 from typing import Any, Dict
 from dotenv import load_dotenv
