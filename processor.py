@@ -10,7 +10,7 @@ from calculator import Calculator
 from site_settings import SiteSettings
 from jobqueue import WPQueue
 from utils import calculate_hash_groups
-from cleaner import clean_raw_record
+from cleaner import Cleaner
 
 REQUIRED_RAW_FIELDS = ["price", "registration", "Fueltype", "raw_emissions", "Images"]
 
