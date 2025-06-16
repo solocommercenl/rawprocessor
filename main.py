@@ -135,8 +135,8 @@ async def run_cli():
         logger.info(f"Retried {count} failed jobs for {args.site}")
     elif args.rebuild_site:
         # Handle full rebuild site trigger
+        logger.info(f"Triggering full rebuild for site: {args.site}")
         await rebuild_site(args.site)
-        logger.info(f"Rebuild process completed for site {args.site}")
     elif args.trigger:
         await process_trigger(args.trigger, args.site, {})
     else:
