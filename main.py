@@ -22,6 +22,13 @@ db = client[DB_NAME]
 
 # --- Rebuild Logic for Full Rebuild ---
 async def rebuild_site(site: str):
+    """
+    Full rebuild logic for a site:
+    - Drop the existing collection.
+    - Clean and process raw data.
+    - Store processed data in the site-specific collection.
+    - Push changes to Stage 2 queue.
+    """
     configure_logger(site)
     logger.info(f"Rebuilding site: {site}")
 
@@ -147,7 +154,7 @@ async def run_cli():
         count = await queue.retry_failed_jobs()
         logger.info(f"Retried {count} failed jobs for {args.site}")
     elif args.rebuild_site:
-        # **Bypass process_trigger entirely and directly call rebuild_site**
+        # Directly handle rebuild-site trigger here and **skip process_trigger**
         logger.info(f"Triggering full rebuild for site: {args.site}")
         await rebuild_site(args.site)  # This will skip process_trigger entirely
     elif args.trigger:
