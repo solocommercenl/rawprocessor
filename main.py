@@ -20,6 +20,33 @@ DB_NAME = os.environ.get("MONGO_DB", "autodex")
 client = AsyncIOMotorClient(MONGO_URI)
 db = client[DB_NAME]
 
+# --- Rebuild Logic for Full Rebuild ---
+async def rebuild_site(site: str):
+    configure_logger(site)
+    logger.info(f"Rebuilding site: {site}")
+
+    # Load site settings
+    settings = await SiteSettings(db).get(site)
+    
+    cleaner = clean_raw_record
+    translator = Translator(db)
+    calculator = Calculator(db, site)
+    processor = Processor(db, site)
+    queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
+
+    # Rebuilding: Iterate through all raw data and process it
+    cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
+    async for raw in cursor:
+        if await cleaner.is_valid(raw):
+            processed = await processor.process(raw, settings)
+            if processed:
+                changed, hash_groups, changed_fields = await processor.should_sync(processed)
+                if changed:
+                    await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": "full rebuild"})
+        else:
+            # Handle records that fail validation
+            logger.info(f"Excluded raw record with ad_id: {raw.get('ad_id', '')} during rebuild")
+
 @log_exceptions
 async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None:
     configure_logger(site)
@@ -92,33 +119,6 @@ async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None
 
     else:
         logger.warning(f"Unknown trigger: {trigger}")
-
-# --- Rebuild Logic for Full Rebuild ---
-async def rebuild_site(site: str):
-    configure_logger(site)
-    logger.info(f"Rebuilding site: {site}")
-
-    # Load site settings
-    settings = await SiteSettings(db).get(site)
-    
-    cleaner = clean_raw_record
-    translator = Translator(db)
-    calculator = Calculator(db, site)
-    processor = Processor(db, site)
-    queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
-
-    # Rebuilding: Iterate through all raw data and process it
-    cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
-    async for raw in cursor:
-        if await cleaner.is_valid(raw):
-            processed = await processor.process(raw, settings)
-            if processed:
-                changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                if changed:
-                    await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": "full rebuild"})
-        else:
-            # Handle records that fail validation
-            logger.info(f"Excluded raw record with ad_id: {raw.get('ad_id', '')} during rebuild")
 
 # --- CLI wrapper for manual triggering ---
 async def run_cli():
