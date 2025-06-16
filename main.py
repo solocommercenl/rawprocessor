@@ -1,3 +1,11 @@
+"""
+main.py
+
+Entrypoint and orchestrator for rawprocessor.
+Handles all triggers: raw insert/update, status change, site/translation updates, and batch jobs.
+Supports CLI for: --trigger --site, --retry-failed, --rebuild-site
+"""
+
 import asyncio
 import os
 import argparse
@@ -8,7 +16,7 @@ from loguru import logger
 
 from logger import configure_logger, log_exceptions
 from site_settings import SiteSettings
-from cleaner import clean_raw_record
+from cleaner import Cleaner
 from translator import Translator
 from calculator import Calculator
 from processor import Processor
@@ -20,60 +28,13 @@ DB_NAME = os.environ.get("MONGO_DB", "autodex")
 client = AsyncIOMotorClient(MONGO_URI)
 db = client[DB_NAME]
 
-# --- Rebuild Logic for Full Rebuild ---
-async def rebuild_site(site: str):
-    """
-    Full rebuild logic for a site:
-    - Drop the existing collection.
-    - Clean and process raw data.
-    - Store processed data in the site-specific collection.
-    - Push changes to Stage 2 queue.
-    """
-    configure_logger(site)
-    logger.info(f"Rebuilding site: {site}")
-
-    # Step 1: Drop the existing site-specific collection if it exists
-    collection_name = f"processed_{site}"
-    if collection_name in db.list_collection_names():
-        logger.info(f"Dropping existing collection: {collection_name}")
-        await db.drop_collection(collection_name)
-
-    # Step 2: Load site settings
-    settings = await SiteSettings(db).get(site)
-    
-    cleaner = clean_raw_record
-    translator = Translator(db)
-    calculator = Calculator(db, site)
-    processor = Processor(db, site)
-    queue = WPQueue(db, site, retry_limit=settings.get("retry_limit", 3))
-
-    # Step 3: Clean raw data and process it
-    cursor = db.raw.find({"cartype": {"$in": settings.get("filter_criteria", {}).get("cartype", ["Car"])}})
-    processed_count = 0
-    async for raw in cursor:
-        if await cleaner.is_valid(raw):
-            # Clean and process the raw record
-            processed = await processor.process(raw, settings)
-            if processed:
-                changed, hash_groups, changed_fields = await processor.should_sync(processed)
-                if changed:
-                    # Store the processed record in the site-specific collection
-                    await db[collection_name].insert_one(processed)
-                    processed_count += 1
-                    await queue.enqueue_job("create", processed["im_ad_id"], None, changed_fields, hash_groups, meta={"reason": "full rebuild"})
-        else:
-            # Handle invalid records and log them
-            logger.info(f"Excluded raw record with ad_id: {raw.get('ad_id', '')} during rebuild")
-
-    logger.info(f"Rebuild completed for site {site}. {processed_count} records processed and added to {collection_name}")
-
 @log_exceptions
 async def process_trigger(trigger: str, site: str, data: Dict[str, Any]) -> None:
     configure_logger(site)
     logger.info(f"Processing trigger: {trigger} for site {site}")
 
     settings = await SiteSettings(db).get(site)
-    cleaner = clean_raw_record
+    cleaner = Cleaner(db, site)
     translator = Translator(db)
     calculator = Calculator(db, site)
     processor = Processor(db, site)
@@ -154,9 +115,9 @@ async def run_cli():
         count = await queue.retry_failed_jobs()
         logger.info(f"Retried {count} failed jobs for {args.site}")
     elif args.rebuild_site:
-        # Directly handle rebuild-site trigger here and **skip process_trigger**
-        logger.info(f"Triggering full rebuild for site: {args.site}")
-        await rebuild_site(args.site)  # This will skip process_trigger entirely
+        processor = Processor(db, args.site)
+        await processor.run()
+        logger.info(f"Re-evaluated all raw listings for site {args.site}")
     elif args.trigger:
         await process_trigger(args.trigger, args.site, {})
     else:
