@@ -146,6 +146,7 @@ class Processor:
         doc["im_first_registration"] = raw.get("registration", "")
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
+        doc["im_fullservicehistory"] = bool(raw.get("service_history", False))
         
         # === APPEARANCE DATA ===
         doc["im_upholstery"] = raw.get("colourandupholstery", {}).get("Upholstery", "")
