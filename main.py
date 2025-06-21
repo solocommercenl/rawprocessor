@@ -31,12 +31,34 @@ DB_NAME = os.environ.get("MONGO_DB", "autodex")
 if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable required")
 
-# Global state
-client = AsyncIOMotorClient(MONGO_URI)
+# Global state with improved connection settings
+client = AsyncIOMotorClient(
+    MONGO_URI,
+    maxPoolSize=50,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=10000,
+    socketTimeoutMS=30000
+)
 db = client[DB_NAME]
 trigger_system = None
 processing_queue = None
 shutdown_event = asyncio.Event()
+
+async def get_trigger_system():
+    """Get or create trigger system singleton with proper initialization."""
+    global trigger_system
+    if not trigger_system:
+        trigger_system = QueuedTriggerSystem(db)
+        await trigger_system.initialize()
+    return trigger_system
+
+async def get_processing_queue():
+    """Get or create processing queue singleton with proper initialization."""
+    global processing_queue
+    if not processing_queue:
+        processing_queue = ProcessingQueue(db)
+        await processing_queue.initialize()
+    return processing_queue
 
 def setup_signal_handlers():
     """Setup graceful shutdown signal handlers."""
@@ -82,17 +104,14 @@ async def start_daemon_mode():
     """
     Start the daemon mode with queued processing system and periodic cleanup.
     """
-    global trigger_system
-    
     logger.info("Starting rawprocessor Stage 1 daemon with queued processing...")
     
     try:
         # Initialize queued trigger system
-        trigger_system = QueuedTriggerSystem(db)
-        await trigger_system.initialize()
+        trigger_sys = await get_trigger_system()
         
         # Start change stream monitoring and workers
-        monitor_task = asyncio.create_task(trigger_system.start_watching())
+        monitor_task = asyncio.create_task(trigger_sys.start_watching())
         
         # Start periodic maintenance tasks
         maintenance_task = asyncio.create_task(run_maintenance_tasks())
@@ -106,7 +125,7 @@ async def start_daemon_mode():
         logger.info("Shutdown signal received, stopping daemon...")
         
         # Stop monitoring, maintenance, and cleanup
-        await trigger_system.stop_watching()
+        await trigger_sys.stop_watching()
         monitor_task.cancel()
         maintenance_task.cancel()
         cleanup_task.cancel()
@@ -136,24 +155,24 @@ async def run_maintenance_tasks():
                 # Timeout occurred, run maintenance
                 pass
             
-            if trigger_system:
-                logger.info("Running periodic maintenance tasks...")
-                
-                # Clean up old completed jobs (older than 24 hours)
-                try:
-                    cleaned_count = await trigger_system.cleanup_old_jobs(hours=24)
-                    logger.info(f"Maintenance: Cleaned up {cleaned_count} old jobs")
-                except Exception as ex:
-                    logger.error(f"Maintenance error during cleanup: {ex}")
-                
-                # Log system performance metrics
-                try:
-                    metrics = await trigger_system.get_processing_performance_metrics()
-                    processed = metrics.get("performance", {}).get("total_jobs_processed", 0)
-                    avg_time = metrics.get("performance", {}).get("average_processing_time", 0)
-                    logger.info(f"Performance: {processed} jobs processed, avg time: {avg_time:.2f}s")
-                except Exception as ex:
-                    logger.error(f"Maintenance error getting metrics: {ex}")
+            trigger_sys = await get_trigger_system()
+            logger.info("Running periodic maintenance tasks...")
+            
+            # Clean up old completed jobs (older than 24 hours)
+            try:
+                cleaned_count = await trigger_sys.cleanup_old_jobs(hours=24)
+                logger.info(f"Maintenance: Cleaned up {cleaned_count} old jobs")
+            except Exception as ex:
+                logger.error(f"Maintenance error during cleanup: {ex}")
+            
+            # Log system performance metrics
+            try:
+                metrics = await trigger_sys.get_processing_performance_metrics()
+                processed = metrics.get("performance", {}).get("total_jobs_processed", 0)
+                avg_time = metrics.get("performance", {}).get("average_processing_time", 0)
+                logger.info(f"Performance: {processed} jobs processed, avg time: {avg_time:.2f}s")
+            except Exception as ex:
+                logger.error(f"Maintenance error getting metrics: {ex}")
                 
     except asyncio.CancelledError:
         logger.info("Maintenance tasks cancelled")
@@ -163,18 +182,14 @@ async def handle_manual_trigger(args):
     """
     Handle manual trigger execution with queued processing.
     """
-    global trigger_system
-    
-    if not trigger_system:
-        trigger_system = QueuedTriggerSystem(db)
-        await trigger_system.initialize()
+    trigger_sys = await get_trigger_system()
     
     trigger_data = {}
     if args.data:
         import json
         trigger_data = json.loads(args.data)
     
-    await trigger_system.manual_trigger(args.trigger, args.site, trigger_data)
+    await trigger_sys.manual_trigger(args.trigger, args.site, trigger_data)
     logger.info(f"Manual trigger '{args.trigger}' queued successfully")
 
 @log_exceptions
@@ -187,12 +202,8 @@ async def handle_retry_failed(args):
     
     if args.processing:
         # Retry failed processing jobs
-        global processing_queue
-        if not processing_queue:
-            processing_queue = ProcessingQueue(db)
-            await processing_queue.initialize()
-        
-        count = await processing_queue.retry_failed_jobs(limit=args.limit or 100)
+        pq = await get_processing_queue()
+        count = await pq.retry_failed_jobs(limit=args.limit or 100)
         logger.info(f"Retried {count} failed processing jobs")
     
     else:
@@ -209,13 +220,8 @@ async def handle_rebuild_site(args):
     if not args.site:
         raise ValueError("--site required for --rebuild-site")
     
-    global trigger_system
-    
-    if not trigger_system:
-        trigger_system = QueuedTriggerSystem(db)
-        await trigger_system.initialize()
-    
-    await trigger_system.manual_trigger("rebuild_site", args.site)
+    trigger_sys = await get_trigger_system()
+    await trigger_sys.manual_trigger("rebuild_site", args.site)
     logger.info(f"Site rebuild queued for '{args.site}'")
 
 @log_exceptions
@@ -253,14 +259,10 @@ async def handle_status():
     """
     Show comprehensive system status including queue metrics.
     """
-    global trigger_system
+    trigger_sys = await get_trigger_system()
     
-    if not trigger_system:
-        trigger_system = QueuedTriggerSystem(db)
-        await trigger_system.initialize()
-    
-    status = await trigger_system.get_system_status()
-    performance = await trigger_system.get_processing_performance_metrics()
+    status = await trigger_sys.get_system_status()
+    performance = await trigger_sys.get_processing_performance_metrics()
     
     print("=== Rawprocessor Stage 1 Status (Queued) ===")
     print(f"Running: {status['running']}")
@@ -361,13 +363,8 @@ async def handle_queue_status(args):
     """
     Show detailed queue status and performance metrics.
     """
-    global processing_queue
-    
-    if not processing_queue:
-        processing_queue = ProcessingQueue(db)
-        await processing_queue.initialize()
-    
-    stats = await processing_queue.get_queue_stats()
+    pq = await get_processing_queue()
+    stats = await pq.get_queue_stats()
     
     print("=== Processing Queue Detailed Status ===")
     print(f"Total Jobs: {stats.get('total_jobs', 0)}")
@@ -395,14 +392,9 @@ async def handle_cleanup_jobs(args):
     """
     Clean up old completed jobs.
     """
-    global processing_queue
-    
-    if not processing_queue:
-        processing_queue = ProcessingQueue(db)
-        await processing_queue.initialize()
-    
+    pq = await get_processing_queue()
     hours = args.hours or 24
-    count = await processing_queue.cleanup_completed_jobs(older_than_hours=hours)
+    count = await pq.cleanup_completed_jobs(older_than_hours=hours)
     print(f"Cleaned up {count} completed jobs older than {hours} hours")
 
 async def main():
