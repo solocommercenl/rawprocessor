@@ -13,13 +13,12 @@ from utils import (
     calculate_hash_groups, normalize_gallery, extract_power_values, 
     serialize_array_for_jetengine, extract_numeric_value
 )
-from cleaner import Cleaner
+from utils_filters import is_record_clean, check_raw_against_filters
 
 class Processor:
     def __init__(self, db: AsyncIOMotorDatabase, site: str):
         self.db = db
         self.site = site
-        self.cleaner = Cleaner(db, site)
         self.translator = Translator(db)
         self.calculator: Optional[Calculator] = None
         self.processed_collection = db[f"processed_{site}"]
@@ -28,13 +27,12 @@ class Processor:
     async def run(self):
         """
         Process all raw records for this site (used for rebuild operations).
-        FIXED: Use proper filtering with check_raw_against_filters instead of MongoDB query filters.
+        Uses proper filtering with utils_filters instead of MongoDB query filters.
         """
         settings = await SiteSettings(self.db).get(self.site)
         self.calculator = Calculator(self.db, settings)
         
-        # FIXED: Get ALL active records, don't apply site filters in MongoDB query
-        # Site filters will be applied in process_single_record via check_raw_against_filters
+        # Get ALL active records, apply filters in code
         cursor = self.db.raw.find({"listing_status": True})
         processed_count = 0
         skipped_count = 0
@@ -59,24 +57,24 @@ class Processor:
     async def process_single_record(self, raw: dict, site_settings: dict) -> Optional[dict]:
         """
         Process a single raw record through the complete pipeline.
+        Uses utils_filters for fast validation instead of cleaner.
         """
         record_id = raw.get("_id") or raw.get("car_id") or "unknown" 
         
         try:
-            # Step 1: Clean and validate the raw record
-            cleaned = await self.cleaner.clean_raw_record(raw, f"[{self.site}]")
-            if not cleaned:
-                logger.debug(f"[{self.site}] Record failed cleaning: {record_id}")
+            # Step 1: Fast basic quality check using utils_filters
+            if not is_record_clean(raw):
+                logger.debug(f"[{self.site}] Skipping dirty record: {record_id}")
                 return None
 
-            # Step 2: Check if record should be processed for this site
+            # Step 2: Check if record should be processed for this site using utils_filters
             site_filters = site_settings.get("filter_criteria", {})
-            if not await self.cleaner.is_record_processable_for_site(cleaned, site_filters, f"[{self.site}]"):
+            if not check_raw_against_filters(raw, site_filters):
                 logger.debug(f"[{self.site}] Record excluded by site filters: {record_id}")
                 return None
 
-            # Step 3: Process the record
-            processed = await self.process(cleaned, site_settings)
+            # Step 3: Process the clean, valid record
+            processed = await self.process(raw, site_settings)
             if not processed:
                 logger.debug(f"[{self.site}] Processing returned None: {record_id}")
                 return None
@@ -127,7 +125,7 @@ class Processor:
     async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
         """
         Build the complete processed document matching the target structure.
-        UPDATED: Added all missing fields and proper JetEngine formatting.
+        Updated with all missing fields and proper JetEngine formatting.
         """
         doc: Dict[str, Any] = {}
 
@@ -142,25 +140,26 @@ class Processor:
         
         # === GALLERY AND FEATURED IMAGE ===
         images = normalize_gallery(raw.get("Images", []))
-        # FIXED: JetEngine expects comma-separated gallery, not pipe-separated
+        # JetEngine expects comma-separated gallery, not pipe-separated
         doc["im_gallery"] = ",".join(images) if images else ""
         doc["im_featured_image"] = images[0] if images else ""
         
         # === BASIC VEHICLE DATA ===
         doc["im_price_org"] = round(float(raw.get("price", 0)), 2)
-        # FIX: registration_year should be integer
+        # registration_year should be integer
         doc["im_registration_year"] = int(raw.get("registration_year", 0) or 0)
         doc["im_first_registration"] = raw.get("registration", "")
+        # Handle both 'milage' (typo in source) and 'mileage'
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
         doc["im_fullservicehistory"] = str(bool(raw.get("vehiclehistory", {}).get("Fullservicehistory", False))).lower()
         
-        # === POWER EXTRACTION (FIXED: Now actually using the function) ===
+        # === POWER EXTRACTION ===
         kw_power, hp_power = extract_power_values(raw.get("power", ""))
         doc["im_kw_power"] = kw_power or 0
         doc["im_hp_power"] = hp_power or 0
         
-        # === TECHNICAL DATA (MISSING FIELDS) ===
+        # === TECHNICAL DATA ===
         technical_data = raw.get("TechnicalData", {})
         basicdata = raw.get("Basicdata", {})
         
@@ -169,7 +168,7 @@ class Processor:
         doc["im_doors"] = str(basicdata.get("Doors", ""))
         doc["im_drivetrain"] = basicdata.get("Drivetrain", "") or ""
         
-        # FIXED: Extract numeric values from formatted strings using the utility function
+        # Extract numeric values from formatted strings
         empty_weight = extract_numeric_value(technical_data.get("Emptyweight", ""))
         doc["im_empty_weight"] = str(int(empty_weight)) if empty_weight else ""
         
@@ -206,18 +205,18 @@ class Processor:
         doc["im_dealer_contact"] = raw.get("dealer_contact", "")
         doc["im_dealer_phone"] = raw.get("dealer_phone", "")
         doc["im_dealer_city"] = raw.get("dealer_city", "")
-        # FIX: Change im_product_url to im_autoscout
+        # Changed im_product_url to im_autoscout
         doc["im_autoscout"] = raw.get("Product_URL", "")
         
         # === VEHICLE SPECIFICATIONS ===
-        doc["im_seats"] = basicdata.get("Seats", 0)
+        doc["im_seats"] = int(basicdata.get("Seats", 0) or 0)
         doc["im_body_type"] = basicdata.get("Body", "")
         doc["im_gearbox"] = raw.get("gearbox", "")
         doc["im_make_model"] = f"{make} {model}".strip()
         
         # === EMISSIONS AND VAT ===
         doc["im_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
-        # FIX: im_vat_deductible should be string "true"/"false" for JetEngine
+        # im_vat_deductible should be string "true"/"false" for JetEngine
         doc["im_vat_deductible"] = str(bool(raw.get("vatded", False))).lower()
         
         # === TAXONOMIES (for WordPress) ===

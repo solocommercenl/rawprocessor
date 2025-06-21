@@ -1,8 +1,9 @@
 """
-main.py (Updated for Queued Processing)
+main.py (Updated for Queued Processing with Periodic Cleanup)
 
 Entrypoint and orchestrator for rawprocessor Stage 1 with queued processing architecture.
 Handles MongoDB change streams with processing queue for high-volume operations.
+Includes periodic database cleanup every 8 hours.
 """
 
 import asyncio
@@ -20,6 +21,7 @@ from queued_trigger_system import QueuedTriggerSystem
 from processing_queue import ProcessingQueue
 from jobqueue import WPQueue
 from processor import Processor
+from cleaner import Cleaner
 
 # Load environment
 load_dotenv()
@@ -45,10 +47,40 @@ def setup_signal_handlers():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+async def run_periodic_cleanup():
+    """
+    Run database cleanup every 8 hours.
+    Deletes invalid records from raw collection to maintain data quality.
+    """
+    cleaner = Cleaner(db)
+    
+    logger.info("Starting periodic cleanup task (every 8 hours)")
+    
+    while not shutdown_event.is_set():
+        try:
+            # Wait for 8 hours or until shutdown
+            await asyncio.wait_for(shutdown_event.wait(), timeout=8 * 3600)
+            break  # Shutdown event was set
+        except asyncio.TimeoutError:
+            # Timeout occurred, run cleanup
+            pass
+        
+        try:
+            logger.info("Running periodic database cleanup...")
+            stats = await cleaner.cleanup_raw_collection()
+            
+            total_deleted = stats.get("total_deleted", 0)
+            duration = stats.get("duration_seconds", 0)
+            
+            logger.info(f"Periodic cleanup completed: {total_deleted} records deleted in {duration:.2f}s")
+            
+        except Exception as ex:
+            logger.error(f"Error during periodic cleanup: {ex}")
+
 @log_exceptions
 async def start_daemon_mode():
     """
-    Start the daemon mode with queued processing system.
+    Start the daemon mode with queued processing system and periodic cleanup.
     """
     global trigger_system
     
@@ -65,18 +97,22 @@ async def start_daemon_mode():
         # Start periodic maintenance tasks
         maintenance_task = asyncio.create_task(run_maintenance_tasks())
         
+        # Start periodic cleanup task (every 8 hours)
+        cleanup_task = asyncio.create_task(run_periodic_cleanup())
+        
         # Wait for shutdown signal
         await shutdown_event.wait()
         
         logger.info("Shutdown signal received, stopping daemon...")
         
-        # Stop monitoring and maintenance
+        # Stop monitoring, maintenance, and cleanup
         await trigger_system.stop_watching()
         monitor_task.cancel()
         maintenance_task.cancel()
+        cleanup_task.cancel()
         
         try:
-            await asyncio.gather(monitor_task, maintenance_task, return_exceptions=True)
+            await asyncio.gather(monitor_task, maintenance_task, cleanup_task, return_exceptions=True)
         except asyncio.CancelledError:
             pass
             
@@ -183,6 +219,36 @@ async def handle_rebuild_site(args):
     logger.info(f"Site rebuild queued for '{args.site}'")
 
 @log_exceptions
+async def handle_preprocess(args):
+    """
+    Run manual preprocessing to clean raw collection.
+    """
+    logger.info("Running manual preprocessing...")
+    
+    cleaner = Cleaner(db)
+    
+    # Show what would be deleted (dry run)
+    if args.dry_run:
+        candidates = await cleaner.get_cleanup_candidates_count()
+        logger.info(f"Cleanup candidates found:")
+        logger.info(f"  - Records with < 4 images: {candidates['insufficient_images']}")
+        logger.info(f"  - Records with invalid emissions: {candidates['invalid_emissions']}")
+        logger.info(f"  - Total candidates: {candidates['total_candidates']}")
+        logger.info("Use --preprocess without --dry-run to actually delete these records")
+    else:
+        # Actually run cleanup
+        stats = await cleaner.cleanup_raw_collection()
+        total_deleted = stats.get("total_deleted", 0)
+        duration = stats.get("duration_seconds", 0)
+        
+        logger.info(f"Manual preprocessing completed:")
+        logger.info(f"  - Total deleted: {total_deleted} records")
+        logger.info(f"  - Duration: {duration:.2f} seconds")
+        
+        if total_deleted > 0:
+            logger.info("Recommendation: Restart processing to ensure clean pipeline")
+
+@log_exceptions
 async def handle_status():
     """
     Show comprehensive system status including queue metrics.
@@ -242,7 +308,7 @@ async def handle_test_one(args):
         raise ValueError("--site required for --test-one")
     
     from site_settings import SiteSettings
-    from cleaner import Cleaner
+    from utils_filters import is_record_clean, check_raw_against_filters
     import json
     
     # Get one raw record
@@ -260,19 +326,17 @@ async def handle_test_one(args):
     # Load site settings
     site_settings = await SiteSettings(db).get(args.site)
     
-    # Test cleaning
-    cleaner = Cleaner(db, args.site)
-    cleaned = await cleaner.clean_raw_record(raw, f"[{args.site}]")
-    
-    if not cleaned:
-        print("❌ Record failed cleaning validation")
+    # Test basic cleaning (using utils_filters now)
+    is_clean = is_record_clean(raw)
+    if not is_clean:
+        print("❌ Record failed basic quality validation")
         return
     
-    print("✅ Record passed cleaning validation")
+    print("✅ Record passed basic quality validation")
     
     # Test site filter check
     site_filters = site_settings.get("filter_criteria", {})
-    processable = await cleaner.is_record_processable_for_site(cleaned, site_filters, f"[{args.site}]")
+    processable = check_raw_against_filters(raw, site_filters, f"[{args.site}]")
     
     if not processable:
         print("❌ Record excluded by site filters")
@@ -282,7 +346,7 @@ async def handle_test_one(args):
     
     # Test full processing
     processor = Processor(db, args.site)
-    processed = await processor.process_single_record(cleaned, site_settings)
+    processed = await processor.process_single_record(raw, site_settings)
     
     if not processed:
         print("❌ Processing returned None")
@@ -350,8 +414,12 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Start daemon mode (production)
+  # Start daemon mode (production) - includes 8-hour periodic cleanup
   python main.py --daemon
+  
+  # Manual preprocessing (database cleanup)
+  python main.py --preprocess --dry-run  # See what would be deleted
+  python main.py --preprocess             # Actually delete invalid records
   
   # Manual triggers (now queued)
   python main.py --trigger site_settings.filters_changed --site solostaging
@@ -373,7 +441,7 @@ Examples:
     )
     
     # Mode selection
-    parser.add_argument("--daemon", action="store_true", help="Start daemon mode (MongoDB change streams + queue workers)")
+    parser.add_argument("--daemon", action="store_true", help="Start daemon mode (MongoDB change streams + queue workers + periodic cleanup)")
     parser.add_argument("--trigger", help="Manual trigger type")
     parser.add_argument("--rebuild-site", action="store_true", help="Rebuild all records for a site (queued)")
     parser.add_argument("--retry-failed", action="store_true", help="Retry failed jobs")
@@ -381,6 +449,7 @@ Examples:
     parser.add_argument("--test-one", action="store_true", help="Test processing of one record")
     parser.add_argument("--queue-status", action="store_true", help="Show detailed queue status")
     parser.add_argument("--cleanup-jobs", action="store_true", help="Clean up old completed jobs")
+    parser.add_argument("--preprocess", action="store_true", help="Run manual preprocessing to clean raw collection")
     
     # Parameters
     parser.add_argument("--site", help="Site to operate on")
@@ -389,6 +458,7 @@ Examples:
     parser.add_argument("--limit", type=int, help="Limit for batch operations")
     parser.add_argument("--hours", type=int, help="Hours for cleanup operations")
     parser.add_argument("--processing", action="store_true", help="Target processing queue instead of WP queue")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
     
     # Logging
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -427,6 +497,8 @@ Examples:
             await handle_queue_status(args)
         elif args.cleanup_jobs:
             await handle_cleanup_jobs(args)
+        elif args.preprocess:
+            await handle_preprocess(args)
         else:
             parser.print_help()
             
