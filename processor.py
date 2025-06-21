@@ -142,7 +142,7 @@ class Processor:
         
         # === GALLERY AND FEATURED IMAGE ===
         images = normalize_gallery(raw.get("Images", []))
-        # JetEngine expects comma-separated gallery, not pipe-separated
+        # FIXED: JetEngine expects comma-separated gallery, not pipe-separated
         doc["im_gallery"] = ",".join(images) if images else ""
         doc["im_featured_image"] = images[0] if images else ""
         
@@ -155,7 +155,7 @@ class Processor:
         doc["im_power"] = raw.get("power", "")
         doc["im_fullservicehistory"] = str(bool(raw.get("vehiclehistory", {}).get("Fullservicehistory", False))).lower()
         
-        # === POWER EXTRACTION ===
+        # === POWER EXTRACTION (FIXED: Now actually using the function) ===
         kw_power, hp_power = extract_power_values(raw.get("power", ""))
         doc["im_kw_power"] = kw_power or 0
         doc["im_hp_power"] = hp_power or 0
@@ -169,7 +169,7 @@ class Processor:
         doc["im_doors"] = str(basicdata.get("Doors", ""))
         doc["im_drivetrain"] = basicdata.get("Drivetrain", "") or ""
         
-        # Extract numeric values from formatted strings
+        # FIXED: Extract numeric values from formatted strings using the utility function
         empty_weight = extract_numeric_value(technical_data.get("Emptyweight", ""))
         doc["im_empty_weight"] = str(int(empty_weight)) if empty_weight else ""
         
