@@ -2,6 +2,5 @@ motor
 python-dotenv
 loguru
 rich
-APScheduler
-schedule
-pydantic
+aiohttp
+psutil
