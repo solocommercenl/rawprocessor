@@ -25,13 +25,14 @@ class Processor:
     async def run(self):
         """
         Process all raw records for this site (used for rebuild operations).
+        FIXED: Use proper filtering with check_raw_against_filters instead of MongoDB query filters.
         """
         settings = await SiteSettings(self.db).get(self.site)
         self.calculator = Calculator(self.db, settings)
-        filters = settings.get("filter_criteria", {})
         
-        # Find all active raw records
-        cursor = self.db.raw.find({"listing_status": True, **filters})
+        # FIXED: Get ALL active records, don't apply site filters in MongoDB query
+        # Site filters will be applied in process_single_record via check_raw_against_filters
+        cursor = self.db.raw.find({"listing_status": True})
         processed_count = 0
         skipped_count = 0
 
