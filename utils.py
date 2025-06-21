@@ -4,7 +4,7 @@ utils.py
 Shared helpers for rawprocessor (date parsing, Mongo lookups, hash logic, etc).
 All helpers are modular, async-ready, robust, and documented.
 
-FIXED: Corrected function names and field mapping.
+UPDATED: Added power parsing and PHP serialization for JetEngine compatibility.
 """
 
 import hashlib
@@ -42,11 +42,69 @@ def normalize_make_model(make: str, model: str) -> Tuple[str, str]:
 
 # --- Power Extraction ---
 def extract_power_values(power_str: str) -> Tuple[Optional[int], Optional[int]]:
-    kw_match = re.search(r"(\d+)\s*kW", power_str)
-    hp_match = re.search(r"\((\d+)\s*PK\)", power_str)
-    kw = int(kw_match.group(1)) if kw_match else None
-    hp = int(hp_match.group(1)) if hp_match else None
+    """
+    Extract HP and KW values from power string.
+    Examples: "100 kW (136 hp)", "136 hp", "100 kW"
+    """
+    if not power_str:
+        return None, None
+    
+    kw = None
+    hp = None
+    
+    # Try to extract kW value
+    kw_match = re.search(r"(\d+)\s*kW", power_str, re.IGNORECASE)
+    if kw_match:
+        kw = int(kw_match.group(1))
+    
+    # Try to extract HP value - look for patterns like (136 hp), (136 PK), or just 136 hp
+    hp_patterns = [
+        r"\((\d+)\s*(?:hp|pk)\)",  # (136 hp) or (136 PK)
+        r"(\d+)\s*(?:hp|pk)(?!\w)",  # 136 hp or 136 PK (not followed by word char)
+    ]
+    
+    for pattern in hp_patterns:
+        hp_match = re.search(pattern, power_str, re.IGNORECASE)
+        if hp_match:
+            hp = int(hp_match.group(1))
+            break
+    
     return kw, hp
+
+# --- PHP Serialization for JetEngine ---
+def serialize_array_for_jetengine(items: List[str]) -> str:
+    """
+    Convert Python list to PHP serialized array format for JetEngine.
+    Example: ['item1', 'item2'] -> 'a:2:{i:0;s:5:"item1";i:1;s:5:"item2";}'
+    """
+    if not items:
+        return 'a:0:{}'
+    
+    parts = [f'a:{len(items)}:{{']
+    
+    for i, item in enumerate(items):
+        item_str = str(item)
+        parts.append(f'i:{i};s:{len(item_str)}:"{item_str}";')
+    
+    parts.append('}')
+    return ''.join(parts)
+
+# --- Extract Numeric Values ---
+def extract_numeric_value(value_str: str) -> Optional[float]:
+    """
+    Extract numeric value from strings like "1,305 kg", "1,199 cc", "8,333 km"
+    """
+    if not value_str:
+        return None
+    
+    # Remove common units and extract numbers
+    clean_str = re.sub(r'[^\d,.-]', '', str(value_str))
+    clean_str = clean_str.replace(',', '')
+    
+    try:
+        return float(clean_str)
+    except (ValueError, TypeError):
+        return None
 
 # --- Flexible Date Parsing ---
 def parse_registration_date(registration_date: Optional[str], registration_year: Optional[int]) -> Tuple[int, int]:
@@ -118,7 +176,7 @@ async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
         if reg_year == 2020:
             query["half"] = "H1" if reg_month < 7 else "H2"
         
-        doc = await db.bpm_tables.find_one(query)
+        doc = await db.bmp_tables.find_one(query)
         if not doc:
             logger.warning("No BPM table found for year %s", reg_year)
             return None

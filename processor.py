@@ -9,7 +9,10 @@ from translator import Translator
 from calculator import Calculator
 from site_settings import SiteSettings  
 from jobqueue import WPQueue
-from utils import calculate_hash_groups, normalize_gallery
+from utils import (
+    calculate_hash_groups, normalize_gallery, extract_power_values, 
+    serialize_array_for_jetengine, extract_numeric_value
+)
 from cleaner import Cleaner
 
 class Processor:
@@ -124,6 +127,7 @@ class Processor:
     async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
         """
         Build the complete processed document matching the target structure.
+        UPDATED: Added all missing fields and proper JetEngine formatting.
         """
         doc: Dict[str, Any] = {}
 
@@ -138,51 +142,100 @@ class Processor:
         
         # === GALLERY AND FEATURED IMAGE ===
         images = normalize_gallery(raw.get("Images", []))
-        doc["im_gallery"] = "|".join(images) if images else ""
+        # JetEngine expects comma-separated gallery, not pipe-separated
+        doc["im_gallery"] = ",".join(images) if images else ""
         doc["im_featured_image"] = images[0] if images else ""
         
         # === BASIC VEHICLE DATA ===
         doc["im_price_org"] = round(float(raw.get("price", 0)), 2)
-        doc["im_registration_year"] = str(raw.get("registration_year", ""))
+        # FIX: registration_year should be integer
+        doc["im_registration_year"] = int(raw.get("registration_year", 0) or 0)
         doc["im_first_registration"] = raw.get("registration", "")
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
-        doc["im_fullservicehistory"] = bool(raw.get("service_history", False))
+        doc["im_fullservicehistory"] = str(bool(raw.get("vehiclehistory", {}).get("Fullservicehistory", False))).lower()
+        
+        # === POWER EXTRACTION ===
+        kw_power, hp_power = extract_power_values(raw.get("power", ""))
+        doc["im_kw_power"] = kw_power or 0
+        doc["im_hp_power"] = hp_power or 0
+        
+        # === TECHNICAL DATA (MISSING FIELDS) ===
+        technical_data = raw.get("TechnicalData", {})
+        basicdata = raw.get("Basicdata", {})
+        
+        doc["im_vehicle_type"] = "car"  # Default as per WP data
+        doc["im_cylinders"] = str(technical_data.get("Cylinders", ""))
+        doc["im_doors"] = str(basicdata.get("Doors", ""))
+        doc["im_drivetrain"] = basicdata.get("Drivetrain", "") or ""
+        
+        # Extract numeric values from formatted strings
+        empty_weight = extract_numeric_value(technical_data.get("Emptyweight", ""))
+        doc["im_empty_weight"] = str(int(empty_weight)) if empty_weight else ""
+        
+        engine_size = extract_numeric_value(technical_data.get("Enginesize", ""))
+        doc["im_engine_size"] = str(int(engine_size)) if engine_size else ""
+        
+        # Emissions formatting
+        emissions_data = raw.get("energyconsumption", {})
+        emissions_str = emissions_data.get("emissions", "")
+        if emissions_str:
+            doc["im_emissions"] = emissions_str
+        else:
+            raw_emissions = emissions_data.get("raw_emissions")
+            if raw_emissions:
+                doc["im_emissions"] = f"{raw_emissions}gram comb"
+            else:
+                doc["im_emissions"] = ""
+        
+        # === ADDITIONAL MISSING FIELDS ===
+        vehicle_history = raw.get("vehiclehistory", {})
+        doc["im_fuel_consumption"] = ""  # Not available in raw data
+        doc["im_modelcode"] = basicdata.get("Modelcode", "") or ""
+        doc["im_previousowner"] = str(vehicle_history.get("Previousowner", ""))
         
         # === APPEARANCE DATA ===
-        doc["im_upholstery"] = raw.get("colourandupholstery", {}).get("Upholstery", "")
-        doc["im_manufacturer_color"] = raw.get("colourandupholstery", {}).get("Manufacturercolour", "")
-        doc["im_paint_type"] = raw.get("colourandupholstery", {}).get("Paint", "")
+        colour_data = raw.get("colourandupholstery", {})
+        doc["im_upholstery"] = colour_data.get("Upholstery", "")
+        doc["im_upholstery_colour"] = ""  # Not available in raw data structure
+        doc["im_manufacturer_color"] = colour_data.get("Manufacturercolour", "")
+        doc["im_paint_type"] = colour_data.get("Paint", "")
         
         # === DEALER DATA ===  
         doc["im_dealer_company"] = raw.get("dealer_company", "")
         doc["im_dealer_contact"] = raw.get("dealer_contact", "")
         doc["im_dealer_phone"] = raw.get("dealer_phone", "")
         doc["im_dealer_city"] = raw.get("dealer_city", "")
-        doc["im_product_url"] = raw.get("Product_URL", "")
+        # FIX: Change im_product_url to im_autoscout
+        doc["im_autoscout"] = raw.get("Product_URL", "")
         
         # === VEHICLE SPECIFICATIONS ===
-        doc["im_seats"] = raw.get("Basicdata", {}).get("Seats", 0)
-        doc["im_body_type"] = raw.get("Basicdata", {}).get("Body", "")
+        doc["im_seats"] = basicdata.get("Seats", 0)
+        doc["im_body_type"] = basicdata.get("Body", "")
         doc["im_gearbox"] = raw.get("gearbox", "")
         doc["im_make_model"] = f"{make} {model}".strip()
         
         # === EMISSIONS AND VAT ===
         doc["im_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
-        doc["im_vat_deductible"] = bool(raw.get("vatded", False))
+        # FIX: im_vat_deductible should be string "true"/"false" for JetEngine
+        doc["im_vat_deductible"] = str(bool(raw.get("vatded", False))).lower()
         
         # === TAXONOMIES (for WordPress) ===
         doc["make"] = make
         doc["model"] = model  
-        doc["color"] = raw.get("colourandupholstery", {}).get("Colour", "")
+        doc["color"] = colour_data.get("Colour", "")
         
         # === STATUS AND TIMESTAMPS ===
-        doc["im_status"] = True
+        doc["im_status"] = "True"  # JetEngine expects string
         doc["updated_at"] = datetime.utcnow()
         
         # === ADD TRANSLATED FIELDS ===
         for key, value in translated.items():
-            doc[key] = value
+            # Convert arrays to PHP serialized format for JetEngine
+            if isinstance(value, list):
+                doc[key] = serialize_array_for_jetengine(value)
+            else:
+                doc[key] = value
         
         # === ADD FINANCIAL CALCULATIONS (rounded to integers) ===
         for key, value in financials.items():
