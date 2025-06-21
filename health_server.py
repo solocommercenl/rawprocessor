@@ -1,14 +1,18 @@
 """
 health_server.py
 
-Health check HTTP server for rawprocessor service monitoring.
-Runs alongside the main daemon to provide health status endpoints.
+Enhanced health check HTTP server for rawprocessor service monitoring.
+Supports configurable host/port and optional authentication.
+
+FIXED: Motor database boolean evaluation issues.
 """
 
 import asyncio
 import os
 import sys
-from datetime import datetime
+import base64
+import hashlib
+from datetime import datetime, timedelta
 from aiohttp import web, ClientTimeout
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
@@ -19,6 +23,12 @@ import psutil
 load_dotenv()
 MONGO_URI = os.environ.get("MONGO_URI")
 DB_NAME = os.environ.get("MONGO_DB", "autodex")
+
+# Health server configuration from environment
+HEALTH_HOST = os.environ.get("HEALTH_HOST", "localhost")  # Set to "0.0.0.0" for all interfaces
+HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8080"))
+HEALTH_AUTH_USER = os.environ.get("HEALTH_AUTH_USER")  # Optional basic auth
+HEALTH_AUTH_PASS = os.environ.get("HEALTH_AUTH_PASS")  # Optional basic auth
 
 class HealthChecker:
     def __init__(self):
@@ -41,7 +51,7 @@ class HealthChecker:
 
     async def check_mongodb(self):
         """Check MongoDB connectivity and basic operations."""
-        if not self.client:
+        if self.client is None:
             return {"status": "error", "message": "No MongoDB connection"}
         
         try:
@@ -62,7 +72,7 @@ class HealthChecker:
 
     async def check_processing_queue(self):
         """Check processing queue health."""
-        if not self.db:
+        if self.db is None:
             return {"status": "error", "message": "No database connection"}
         
         try:
@@ -104,7 +114,7 @@ class HealthChecker:
 
     async def check_wp_queues(self):
         """Check WordPress sync queues for all sites."""
-        if not self.db:
+        if self.db is None:
             return {"status": "error", "message": "No database connection"}
         
         try:
@@ -155,8 +165,11 @@ class HealthChecker:
             cpu_percent = psutil.cpu_percent(interval=1)
             
             # Disk usage for logs directory
-            disk_usage = psutil.disk_usage('/opt/rawprocessor/logs')
-            disk_percent = (disk_usage.used / disk_usage.total) * 100
+            try:
+                disk_usage = psutil.disk_usage('/opt/rawprocessor/logs')
+                disk_percent = (disk_usage.used / disk_usage.total) * 100
+            except:
+                disk_percent = 0
             
             status = "healthy"
             warnings = []
@@ -185,6 +198,37 @@ class HealthChecker:
 
 # Global health checker instance
 health_checker = HealthChecker()
+
+def check_auth(request):
+    """Check basic authentication if configured."""
+    if not HEALTH_AUTH_USER or not HEALTH_AUTH_PASS:
+        return True  # No auth required
+    
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Basic '):
+        return False
+    
+    try:
+        # Decode basic auth
+        encoded_credentials = auth_header[6:]  # Remove 'Basic '
+        decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+        username, password = decoded_credentials.split(':', 1)
+        
+        return username == HEALTH_AUTH_USER and password == HEALTH_AUTH_PASS
+    except:
+        return False
+
+@web.middleware
+async def auth_middleware(request, handler):
+    """Authentication middleware."""
+    if not check_auth(request):
+        return web.Response(
+            text='Authentication required',
+            status=401,
+            headers={'WWW-Authenticate': 'Basic realm="Rawprocessor Health"'}
+        )
+    
+    return await handler(request)
 
 async def health_endpoint(request):
     """Main health check endpoint."""
@@ -216,6 +260,11 @@ async def health_endpoint(request):
             "status": overall_status,
             "timestamp": datetime.utcnow().isoformat(),
             "uptime_seconds": uptime_seconds,
+            "server_info": {
+                "host": HEALTH_HOST,
+                "port": HEALTH_PORT,
+                "auth_enabled": bool(HEALTH_AUTH_USER)
+            },
             "checks": {
                 "mongodb": mongodb_health,
                 "processing_queue": queue_health,
@@ -279,14 +328,39 @@ async def metrics_endpoint(request):
     except Exception as ex:
         return web.Response(text=f'# Error: {ex}\n', content_type='text/plain', status=503)
 
+async def info_endpoint(request):
+    """Information endpoint showing configuration."""
+    info = {
+        "service": "rawprocessor-health",
+        "version": "1.0.0",
+        "host": HEALTH_HOST,
+        "port": HEALTH_PORT,
+        "auth_enabled": bool(HEALTH_AUTH_USER),
+        "endpoints": {
+            "/health": "Comprehensive health check",
+            "/ready": "Simple readiness check",
+            "/metrics": "Prometheus metrics",
+            "/info": "Service information"
+        }
+    }
+    return web.json_response(info)
+
 async def init_app():
     """Initialize the health check web application."""
     await health_checker.initialize()
     
     app = web.Application()
+    
+    # Add auth middleware if authentication is configured
+    if HEALTH_AUTH_USER and HEALTH_AUTH_PASS:
+        app.middlewares.append(auth_middleware)
+        print(f"Authentication enabled for user: {HEALTH_AUTH_USER}")
+    
     app.router.add_get('/health', health_endpoint)
     app.router.add_get('/ready', ready_endpoint)
     app.router.add_get('/metrics', metrics_endpoint)
+    app.router.add_get('/info', info_endpoint)
+    app.router.add_get('/', info_endpoint)  # Default route
     
     return app
 
@@ -295,16 +369,20 @@ async def main():
     try:
         app = await init_app()
         
-        print("Starting health check server on http://localhost:8080")
+        print(f"Starting health check server on {HEALTH_HOST}:{HEALTH_PORT}")
         print("Endpoints available:")
         print("  /health  - Comprehensive health check")
         print("  /ready   - Simple readiness check")
         print("  /metrics - Prometheus metrics")
+        print("  /info    - Service information")
+        
+        if HEALTH_HOST == "0.0.0.0":
+            print("⚠️  Server listening on ALL interfaces - ensure proper firewall configuration!")
         
         runner = web.AppRunner(app)
         await runner.setup()
         
-        site = web.TCPSite(runner, 'localhost', 8080)
+        site = web.TCPSite(runner, HEALTH_HOST, HEALTH_PORT)
         await site.start()
         
         # Keep the server running
@@ -318,6 +396,4 @@ async def main():
         sys.exit(1)
 
 if __name__ == '__main__':
-    # Add missing import
-    from datetime import timedelta
     asyncio.run(main())
