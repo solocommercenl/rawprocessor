@@ -1,0 +1,50 @@
+[Unit]
+Description=Rawprocessor Stage 1 - MongoDB to WordPress Data Pipeline
+Documentation=https://github.com/yourusername/rawprocessor
+After=network-online.target mongod.service
+Wants=network-online.target
+Requires=mongod.service
+
+[Service]
+Type=simple
+User=rawprocessor
+Group=rawprocessor
+WorkingDirectory=/opt/rawprocessor
+Environment=PATH=/opt/rawprocessor/.venv/bin
+
+# Main command
+ExecStart=/opt/rawprocessor/.venv/bin/python main.py --daemon --log-level INFO
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Health check
+ExecStartPost=/bin/sleep 15
+ExecStartPost=/bin/bash -c 'for i in {1..5}; do curl -f http://localhost:8080/health && exit 0; sleep 2; done; exit 1'
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/rawprocessor/logs
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+CPUQuota=200%
+
+# Environment
+EnvironmentFile=/opt/rawprocessor/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rawprocessor
+
+[Install]
+WantedBy=multi-user.target
