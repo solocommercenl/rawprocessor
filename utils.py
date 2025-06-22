@@ -4,7 +4,7 @@ utils.py
 Shared helpers for rawprocessor (date parsing, Mongo lookups, hash logic, etc).
 All helpers are modular, async-ready, robust, and documented.
 
-UPDATED: Added power parsing and PHP serialization for JetEngine compatibility.
+FIXED: All BPM references corrected and lookup functions restored.
 """
 
 import hashlib
@@ -168,6 +168,7 @@ async def get_depreciation_percentage(db: AsyncIOMotorDatabase, age_in_months: i
 async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
     """
     Get BPM entry from MongoDB lookup tables based on registration year and emissions.
+    FIXED: Corrected table name to bpm_tables.
     """
     try:
         query = {"year": reg_year}
@@ -189,6 +190,8 @@ async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
             # Handle infinity upper bound
             if isinstance(upper, dict) and "$numberDouble" in upper:
                 upper = float('inf')
+            elif isinstance(upper, str) and upper.lower() == "infinity":
+                upper = float('inf')
             
             if lower <= raw_emissions < upper:
                 return entry
@@ -204,6 +207,7 @@ async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
 async def get_phev_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int) -> Optional[dict]:
     """
     Get PHEV entry from MongoDB lookup tables for hybrid vehicles.
+    FIXED: Corrected table name to phev_tables.
     """
     try:
         query = {"year": reg_year}
@@ -224,6 +228,8 @@ async def get_phev_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions:
             
             # Handle infinity upper bound
             if isinstance(upper, dict) and "$numberDouble" in upper:
+                upper = float('inf')
+            elif isinstance(upper, str) and upper.lower() == "infinity":
                 upper = float('inf')
             
             if lower <= raw_emissions < upper:

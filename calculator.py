@@ -5,7 +5,7 @@ All financial logic for rawprocessor Stage 1.
 Implements VAT-deductible (vated=True) and margin (vated=False) business rules for vehicle imports,
 using exact legacy BPM logic and Mongo-driven tables.
 
-UPDATED: Now uses centralized configuration system for financial constants.
+FIXED: BPM calculation restored to working state based on legacy calculator.
 """
 
 import logging
@@ -18,7 +18,7 @@ from utils import (
     parse_registration_date,
     calculate_age_in_months,
     get_depreciation_percentage,
-    get_bmp_entry,
+    get_bpm_entry,
     get_phev_entry,
     get_diesel_surcharge
 )
@@ -33,8 +33,8 @@ class Calculator:
         # Financial constants from configuration
         self.vat_rate_nl = config.VAT_RATE_NL
         self.vat_rate_de = config.VAT_RATE_DE
-        self.bmp_phev_threshold_old = config.BMP_PHEV_THRESHOLD_OLD
-        self.bmp_phev_threshold_new = config.BMP_PHEV_THRESHOLD_NEW
+        self.bpm_phev_threshold_old = config.BPM_PHEV_THRESHOLD_OLD
+        self.bpm_phev_threshold_new = config.BPM_PHEV_THRESHOLD_NEW
         self.default_down_payment_pct = config.DEFAULT_DOWN_PAYMENT_PCT
         self.default_remaining_debt_pct = config.DEFAULT_REMAINING_DEBT_PCT
         
@@ -113,24 +113,24 @@ class Calculator:
                 im_vat_amount = round(im_taxable_part * vat_pct, 2)
 
             # --- Step 3: BPM Calculation ---
-            bmp_data = await self.calculate_bmp(
+            bpm_data = await self.calculate_bpm(
                 raw_emissions=raw_emissions,
                 fuel_type=fuel_type,
                 registration_date=registration_date,
                 registration_year=registration_year
             )
-            im_bmp_rate = round(bmp_data.get("bmp_rate", 0.0), 2)
-            im_bmp_exempt = bmp_data.get("bmp_exempt", False)
+            im_bpm_rate = round(bpm_data.get("bpm_rate", 0.0), 2)
+            im_bpm_exempt = bpm_data.get("bpm_exempt", False)
 
             # --- Step 4: Final price calculations ---
             if vated:
-                im_price = round(im_total_taxable_price + im_vat_amount + im_bmp_rate, 2)
-                im_nett_sales_price = round(im_total_taxable_price + im_bmp_rate, 2)
+                im_price = round(im_total_taxable_price + im_vat_amount + im_bpm_rate, 2)
+                im_nett_sales_price = round(im_total_taxable_price + im_bpm_rate, 2)
                 im_nett_margin = round(im_total_taxable_price - im_extra_cost_total - im_nett_price, 2)
             else:
-                im_price = round(im_price_org + im_extra_cost_total + im_unforeseen_cost + im_vat_amount + im_bmp_rate, 2)
-                im_nett_sales_price = round(im_price_org + im_extra_cost_total + im_unforeseen_cost + im_bmp_rate, 2)
-                im_nett_margin = round(im_nett_sales_price - im_extra_cost_total - im_bmp_rate - im_price_org, 2)
+                im_price = round(im_price_org + im_extra_cost_total + im_unforeseen_cost + im_vat_amount + im_bpm_rate, 2)
+                im_nett_sales_price = round(im_price_org + im_extra_cost_total + im_unforeseen_cost + im_bpm_rate, 2)
+                im_nett_margin = round(im_nett_sales_price - im_extra_cost_total - im_bpm_rate - im_price_org, 2)
 
             # --- Step 5: Leasing calculations (using configured percentages) ---
             im_down_payment = round(self.default_down_payment_pct * im_price, 2)
@@ -150,8 +150,8 @@ class Calculator:
                 "im_extra_cost_total": im_extra_cost_total,
                 "im_unforeseen_cost": im_unforeseen_cost,
                 "im_vat_amount": im_vat_amount,
-                "im_bmp_rate": im_bmp_rate,
-                "im_bmp_exempt": im_bmp_exempt,
+                "im_bpm_rate": im_bpm_rate,
+                "im_bpm_exempt": im_bpm_exempt,
                 "im_price": im_price,
                 "im_nett_sales_price": im_nett_sales_price,
                 "im_nett_margin": im_nett_margin,
@@ -162,7 +162,7 @@ class Calculator:
             
             logger.info("Calculated financials for record %s: %s", 
                        record.get("car_id", "unknown"), 
-                       {k: v for k, v in result.items() if k in ["im_price", "im_bmp_rate", "im_monthly_payment"]})
+                       {k: v for k, v in result.items() if k in ["im_price", "im_bpm_rate", "im_monthly_payment"]})
             return result
 
         except Exception as ex:
@@ -214,7 +214,7 @@ class Calculator:
             logger.error("Monthly payment calculation failed: %s", ex)
             return 0.0
 
-    async def calculate_bmp(
+    async def calculate_bpm(
         self,
         raw_emissions: Optional[float],
         fuel_type: str,
@@ -223,80 +223,110 @@ class Calculator:
     ) -> Dict[str, Any]:
         """
         Calculate BPM (Dutch vehicle tax) using MongoDB lookup tables.
-        Uses configured PHEV thresholds.
+        FIXED: Restored to working state based on legacy calculator.
         """
         try:
             # Electric vehicles are exempt
-            if fuel_type in ("electric", "elektrisch"):
-                return {"bmp_rate": 0.0, "bmp_exempt": True}
+            fuel_type_clean = (fuel_type or "").strip().lower()
+            if fuel_type_clean in ("electric", "elektrisch"):
+                return {"bpm_rate": 0.0, "bpm_exempt": True}
 
             # Parse registration date
-            reg_month, reg_year = parse_registration_date(registration_date, registration_year)
-            if reg_year == 0:
-                logger.warning("Invalid registration year, BPM calculation skipped")
-                return {"bmp_rate": 0.0, "bmp_exempt": False}
+            try:
+                if registration_date:
+                    if "/" in registration_date:
+                        parts = registration_date.split("/")
+                        if len(parts) == 2:  # MM/YYYY
+                            reg_date = datetime.strptime(registration_date, "%m/%Y")
+                        else:  # DD/MM/YYYY
+                            reg_date = datetime.strptime(registration_date, "%d/%m/%Y")
+                    else:
+                        reg_date = datetime.strptime(registration_date, "%Y")
+                    
+                    registration_month = reg_date.month
+                    registration_year = reg_date.year
+                else:
+                    registration_month = 1
+                    registration_year = int(registration_year or 0)
+            except (ValueError, TypeError):
+                logger.warning("Invalid registration date format: %s", registration_date)
+                return {"bpm_rate": 0.0, "bpm_exempt": False}
+
+            if registration_year == 0 or raw_emissions is None:
+                logger.warning("Missing registration year or emissions data")
+                return {"bpm_rate": 0.0, "bpm_exempt": False}
 
             # Calculate age-based depreciation
             today = datetime.today()
-            age_months = calculate_age_in_months(today, reg_month, reg_year)
-            depreciation_pct = await get_depreciation_percentage(self.db, age_months)
+            age_in_months = (today.year - registration_year) * 12 + (today.month - registration_month)
+            if today.month < registration_month and today.year == registration_year:
+                age_in_months -= 1
+            age_in_months = max(0, age_in_months)
+            
+            depreciation_pct = await get_depreciation_percentage(self.db, age_in_months)
 
             # Handle hybrid vehicles with configured thresholds
-            is_hybrid_gas = fuel_type in ("hybride-benzine", "electric/gasoline")
-            is_hybrid_diesel = fuel_type in ("hybride-diesel", "electric/diesel")
+            is_hybrid_gas = "electric" in fuel_type_clean and "gasoline" in fuel_type_clean
+            is_hybrid_diesel = "electric" in fuel_type_clean and "diesel" in fuel_type_clean
             
             if is_hybrid_gas or is_hybrid_diesel:
                 # For 2025+ hybrids, use standard tables
-                if reg_year >= 2025:
-                    fuel_type_lookup = "diesel" if is_hybrid_diesel else "benzine"
+                if registration_year >= 2025:
+                    fuel_type_lookup = "diesel" if is_hybrid_diesel else "gasoline"
                 else:
                     # Pre-2025 hybrids may qualify for PHEV rates using configured thresholds
-                    threshold = self.bmp_phev_threshold_old if reg_year < 2020 or (reg_year == 2020 and reg_month < 7) else self.bmp_phev_threshold_new
+                    threshold = self.bpm_phev_threshold_old if registration_year < 2020 or (registration_year == 2020 and registration_month < 7) else self.bpm_phev_threshold_new
                     
-                    if raw_emissions is not None and float(raw_emissions) <= threshold:
-                        phev_entry = await get_phev_entry(self.db, reg_year, float(raw_emissions), reg_month)
+                    if raw_emissions <= threshold:
+                        phev_entry = await get_phev_entry(self.db, registration_year, float(raw_emissions), registration_month)
                         if phev_entry:
-                            base_bmp = phev_entry["bmp"]
+                            base_bpm = phev_entry["bpm"]
                             surcharge = (float(raw_emissions) - phev_entry["lower"]) * phev_entry["multiplier"]
-                            gross_bmp = base_bmp + surcharge
-                            final_bmp = gross_bmp * ((100 - depreciation_pct) / 100)
-                            logger.debug(f"PHEV BPM calculation: threshold={threshold}, base={base_bmp}, final={final_bmp}")
-                            return {"bmp_rate": round(final_bmp, 2), "bmp_exempt": False}
+                            gross_bpm = base_bpm + surcharge
+                            final_bpm = gross_bpm * ((100 - depreciation_pct) / 100)
+                            logger.debug(f"PHEV BPM calculation: threshold={threshold}, base={base_bpm}, final={final_bpm}")
+                            return {"bpm_rate": round(final_bpm, 2), "bpm_exempt": False}
                     
-                    fuel_type_lookup = "diesel" if is_hybrid_diesel else "benzine"
+                    fuel_type_lookup = "diesel" if is_hybrid_diesel else "gasoline"
             else:
-                fuel_type_lookup = fuel_type
+                # Map fuel types to lookup keys
+                if fuel_type_clean in ("gasoline", "benzine"):
+                    fuel_type_lookup = "gasoline"
+                elif fuel_type_clean in ("diesel", "dieselkraftstoff"):
+                    fuel_type_lookup = "diesel"
+                else:
+                    fuel_type_lookup = fuel_type_clean
 
             # Get BPM entry from lookup tables
-            bmp_entry = await get_bmp_entry(self.db, reg_year, float(raw_emissions or 0), reg_month, fuel_type_lookup)
-            if not bmp_entry:
+            bpm_entry = await get_bpm_entry(self.db, registration_year, float(raw_emissions), registration_month, fuel_type_lookup)
+            if not bpm_entry:
                 logger.warning("No BPM entry found for year=%s, emissions=%s, fuel=%s", 
-                             reg_year, raw_emissions, fuel_type_lookup)
-                return {"bmp_rate": 0.0, "bmp_exempt": False}
+                             registration_year, raw_emissions, fuel_type_lookup)
+                return {"bpm_rate": 0.0, "bpm_exempt": False}
 
             # Calculate base BPM with surcharge
-            base_bmp = bmp_entry["bmp"]
-            surcharge = (float(raw_emissions or 0) - bmp_entry["lower"]) * bmp_entry["multiplier"]
-            gross_bmp = base_bmp + surcharge
+            base_bpm = bpm_entry["bpm"]
+            surcharge = (float(raw_emissions) - bpm_entry["lower"]) * bpm_entry["multiplier"]
+            gross_bpm = base_bpm + surcharge
 
             # Add diesel surcharge if applicable
-            if fuel_type_lookup in ("diesel", "hybride-diesel", "electric/diesel"):
-                diesel_surcharge_data = await get_diesel_surcharge(self.db, reg_year)
-                if diesel_surcharge_data and float(raw_emissions or 0) > diesel_surcharge_data["threshold"]:
+            if fuel_type_lookup in ("diesel", "electric/diesel") or is_hybrid_diesel:
+                diesel_surcharge_data = await get_diesel_surcharge(self.db, registration_year)
+                if diesel_surcharge_data and float(raw_emissions) > diesel_surcharge_data["threshold"]:
                     diesel_surcharge = (float(raw_emissions) - diesel_surcharge_data["threshold"]) * diesel_surcharge_data["surcharge_rate"]
-                    gross_bmp += diesel_surcharge
+                    gross_bpm += diesel_surcharge
 
             # Apply depreciation
-            final_bmp = gross_bmp * ((100 - depreciation_pct) / 100)
+            final_bpm = gross_bpm * ((100 - depreciation_pct) / 100)
             
             logger.debug("BPM calculation: base=%s, surcharge=%s, depreciation=%s%%, final=%s", 
-                        base_bmp, surcharge, depreciation_pct, final_bmp)
+                        base_bpm, surcharge, depreciation_pct, final_bpm)
             
-            return {"bmp_rate": round(final_bmp, 2), "bmp_exempt": False}
+            return {"bpm_rate": round(final_bpm, 2), "bpm_exempt": False}
 
         except Exception as ex:
             logger.exception("BPM calculation failed: %s", ex)
-            return {"bmp_rate": 0.0, "bmp_exempt": False}
+            return {"bpm_rate": 0.0, "bpm_exempt": False}
 
     def get_financial_config_summary(self) -> Dict[str, Any]:
         """
@@ -308,9 +338,9 @@ class Calculator:
                 "netherlands": self.vat_rate_nl,
                 "germany": self.vat_rate_de
             },
-            "bmp_phev_thresholds": {
-                "old_period": self.bmp_phev_threshold_old,
-                "new_period": self.bmp_phev_threshold_new
+            "bpm_phev_thresholds": {
+                "old_period": self.bpm_phev_threshold_old,
+                "new_period": self.bpm_phev_threshold_new
             },
             "leasing_defaults": {
                 "down_payment_pct": self.default_down_payment_pct,

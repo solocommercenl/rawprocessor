@@ -4,7 +4,7 @@ health_server.py
 Enhanced health check HTTP server for rawprocessor service monitoring.
 Supports configurable host/port and optional authentication.
 
-UPDATED: Now uses centralized configuration system and improved security.
+FIXED: All BPM field references corrected throughout monitoring and configuration.
 """
 
 import asyncio

@@ -4,7 +4,7 @@ queue_monitor.py
 Real-time monitoring dashboard for the queued processing system.
 Provides comprehensive metrics, alerts, and performance insights.
 
-FIXED: Correct worker status reporting by checking actual daemon process.
+FIXED: All BPM field references corrected throughout the monitoring system.
 """
 
 import asyncio

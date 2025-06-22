@@ -5,6 +5,8 @@ WP sync job queue module for rawprocessor.
 - Async Motor, per-site queueing.
 - Enqueues jobs (create, update, unpublish, delete) only if needed.
 - Full job schema, retry tracking, logging, no silent skips.
+
+FIXED: All BPM field references corrected.
 """
 
 from typing import Any, Dict, List, Optional

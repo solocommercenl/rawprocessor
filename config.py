@@ -5,7 +5,7 @@ Centralized configuration system for rawprocessor.
 Loads all configuration from environment variables with sensible defaults.
 Single source of truth for all configurable values.
 
-FIXED: All BMP references corrected to BPM in configuration names and comments.
+FIXED: All BPM references corrected (was incorrectly using "bmp").
 """
 
 import os
@@ -77,7 +77,7 @@ class Config:
     VAT_RATE_NL = get_env_float("VAT_RATE_NL", 0.21)  # Dutch VAT 21%
     VAT_RATE_DE = get_env_float("VAT_RATE_DE", 0.19)  # German VAT 19%
     
-    # BPM PHEV thresholds by registration period (FIXED: BMP → BPM)
+    # BPM PHEV thresholds by registration period
     BPM_PHEV_THRESHOLD_OLD = get_env_int("BPM_PHEV_THRESHOLD_OLD", 50)  # Pre-2020 or 2020 H1
     BPM_PHEV_THRESHOLD_NEW = get_env_int("BPM_PHEV_THRESHOLD_NEW", 60)  # 2020 H2+
     
@@ -171,7 +171,7 @@ class Config:
             "financial": {
                 "vat_nl": cls.VAT_RATE_NL,
                 "vat_de": cls.VAT_RATE_DE,
-                "bpm_phev_thresholds": {  # FIXED: BMP → BPM
+                "bpm_phev_thresholds": {
                     "old": cls.BPM_PHEV_THRESHOLD_OLD,
                     "new": cls.BPM_PHEV_THRESHOLD_NEW
                 },

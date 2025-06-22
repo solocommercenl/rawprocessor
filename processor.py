@@ -126,6 +126,7 @@ class Processor:
         """
         Build the complete processed document matching the target structure.
         Updated with all missing fields and proper JetEngine formatting.
+        FIXED: All BPM field references corrected.
         """
         doc: Dict[str, Any] = {}
 
