@@ -5,6 +5,7 @@ Shared helpers for rawprocessor (date parsing, Mongo lookups, hash logic, etc).
 All helpers are modular, async-ready, robust, and documented.
 
 FIXED: Removed serialize_array_for_jetengine function since JetEngine CLI expects arrays.
+FIXED: Better extract_numeric_value function for European number formats.
 """
 
 import hashlib
@@ -72,20 +73,47 @@ def extract_power_values(power_str: str) -> Tuple[Optional[int], Optional[int]]:
     return kw, hp
 
 # --- Extract Numeric Values ---
-def extract_numeric_value(value_str: str) -> Optional[float]:
+def extract_numeric_value(value_str: str) -> Optional[int]:
     """
     Extract numeric value from strings like "1,305 kg", "1,199 cc", "8,333 km"
+    FIXED: Better handling of European number format with commas as thousands separator
+    Returns integer (rounded, no decimals) as requested.
     """
     if not value_str:
         return None
     
-    # Remove common units and extract numbers
-    clean_str = re.sub(r'[^\d,.-]', '', str(value_str))
-    clean_str = clean_str.replace(',', '')
-    
     try:
-        return float(clean_str)
-    except (ValueError, TypeError):
+        # Convert to string and clean
+        clean_str = str(value_str).strip()
+        
+        # Remove common units (kg, cc, km, etc.)
+        clean_str = re.sub(r'\s*(kg|cc|km|g|l|hp|kw|mph|kmh|lbs|tons?)\b', '', clean_str, flags=re.IGNORECASE)
+        
+        # Remove any remaining non-digit characters except comma, dot, and minus
+        clean_str = re.sub(r'[^\d,.-]', '', clean_str)
+        
+        # Handle European format: "1,305" (comma as thousands separator)
+        # vs decimal format: "1.305" (dot as decimal separator)
+        if ',' in clean_str and '.' in clean_str:
+            # Both comma and dot present - assume European format: "1,305.50"
+            # Remove commas (thousands separator), keep dot (decimal)
+            clean_str = clean_str.replace(',', '')
+        elif ',' in clean_str and '.' not in clean_str:
+            # Only comma present - check if it's thousands separator or decimal
+            parts = clean_str.split(',')
+            if len(parts) == 2 and len(parts[1]) == 3:
+                # Likely thousands separator: "1,305"
+                clean_str = clean_str.replace(',', '')
+            else:
+                # Likely decimal separator: "1,5" -> "1.5"
+                clean_str = clean_str.replace(',', '.')
+        
+        # Convert to float then round to integer
+        result = float(clean_str)
+        return int(round(result))
+        
+    except (ValueError, TypeError, AttributeError) as ex:
+        logger.debug(f"Failed to extract numeric value from '{value_str}': {ex}")
         return None
 
 # --- Flexible Date Parsing ---

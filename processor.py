@@ -125,7 +125,7 @@ class Processor:
     async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
         """
         Build the complete processed document matching the target structure.
-        FIXED: JetEngine CLI expects arrays, NOT PHP serialized format.
+        FIXED: JetEngine CLI expects arrays for both checkboxes AND gallery fields.
         """
         doc: Dict[str, Any] = {}
 
@@ -140,8 +140,8 @@ class Processor:
         
         # === GALLERY AND FEATURED IMAGE ===
         images = normalize_gallery(raw.get("Images", []))
-        # JetEngine expects comma-separated gallery, not pipe-separated
-        doc["im_gallery"] = ",".join(images) if images else ""
+        # FIXED: JetEngine gallery field expects array, not comma-separated string
+        doc["im_gallery"] = images  # Keep as array for JetEngine
         doc["im_featured_image"] = images[0] if images else ""
         
         # === BASIC VEHICLE DATA ===
