@@ -4,6 +4,8 @@ main.py (Updated for Queued Processing with Periodic Cleanup)
 Entrypoint and orchestrator for rawprocessor Stage 1 with queued processing architecture.
 Handles MongoDB change streams with processing queue for high-volume operations.
 Includes periodic database cleanup every 8 hours.
+
+UPDATED: Now uses centralized configuration system.
 """
 
 import asyncio
@@ -12,10 +14,10 @@ import sys
 import argparse
 import signal
 from typing import Any, Dict
-from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from loguru import logger
 
+from config import config
 from logger import configure_logger, log_exceptions
 from queued_trigger_system import QueuedTriggerSystem
 from processing_queue import ProcessingQueue
@@ -23,23 +25,18 @@ from jobqueue import WPQueue
 from processor import Processor
 from cleaner import Cleaner
 
-# Load environment
-load_dotenv()
-MONGO_URI = os.environ.get("MONGO_URI")
-DB_NAME = os.environ.get("MONGO_DB", "autodex")
-
-if not MONGO_URI:
+if not config.MONGO_URI:
     raise ValueError("MONGO_URI environment variable required")
 
-# Global state with improved connection settings
+# Global state with improved connection settings from config
 client = AsyncIOMotorClient(
-    MONGO_URI,
-    maxPoolSize=50,
-    serverSelectionTimeoutMS=5000,
-    connectTimeoutMS=10000,
-    socketTimeoutMS=30000
+    config.MONGO_URI,
+    maxPoolSize=config.MONGO_MAX_POOL_SIZE,
+    serverSelectionTimeoutMS=config.MONGO_SERVER_SELECTION_TIMEOUT,
+    connectTimeoutMS=config.MONGO_CONNECT_TIMEOUT,
+    socketTimeoutMS=config.MONGO_SOCKET_TIMEOUT
 )
-db = client[DB_NAME]
+db = client[config.MONGO_DB]
 trigger_system = None
 processing_queue = None
 shutdown_event = asyncio.Event()
@@ -71,17 +68,22 @@ def setup_signal_handlers():
 
 async def run_periodic_cleanup():
     """
-    Run database cleanup every 8 hours.
+    Run database cleanup based on configured interval.
     Deletes invalid records from raw collection to maintain data quality.
     """
-    cleaner = Cleaner(db)
+    if not config.ENABLE_PERIODIC_CLEANUP:
+        logger.info("Periodic cleanup disabled by configuration")
+        return
     
-    logger.info("Starting periodic cleanup task (every 8 hours)")
+    cleaner = Cleaner(db)
+    cleanup_interval = config.CLEANUP_INTERVAL_HOURS * 3600  # Convert to seconds
+    
+    logger.info(f"Starting periodic cleanup task (every {config.CLEANUP_INTERVAL_HOURS} hours)")
     
     while not shutdown_event.is_set():
         try:
-            # Wait for 8 hours or until shutdown
-            await asyncio.wait_for(shutdown_event.wait(), timeout=8 * 3600)
+            # Wait for configured interval or until shutdown
+            await asyncio.wait_for(shutdown_event.wait(), timeout=cleanup_interval)
             break  # Shutdown event was set
         except asyncio.TimeoutError:
             # Timeout occurred, run cleanup
@@ -106,6 +108,14 @@ async def start_daemon_mode():
     """
     logger.info("Starting rawprocessor Stage 1 daemon with queued processing...")
     
+    # Log configuration summary
+    config_summary = config.summary()
+    logger.info("Configuration loaded:")
+    logger.info(f"  - Database: {config_summary['database']['database']} (pool: {config_summary['database']['pool_size']})")
+    logger.info(f"  - Workers: {config_summary['processing']['max_workers']}, Batch: {config_summary['processing']['batch_size']}")
+    logger.info(f"  - Cleanup: every {config_summary['maintenance']['cleanup_hours']}h")
+    logger.info(f"  - Features: cleanup={config_summary['features']['periodic_cleanup']}, health={config_summary['features']['health_server']}")
+    
     try:
         # Initialize queued trigger system
         trigger_sys = await get_trigger_system()
@@ -116,7 +126,7 @@ async def start_daemon_mode():
         # Start periodic maintenance tasks
         maintenance_task = asyncio.create_task(run_maintenance_tasks())
         
-        # Start periodic cleanup task (every 8 hours)
+        # Start periodic cleanup task (every configured hours)
         cleanup_task = asyncio.create_task(run_periodic_cleanup())
         
         # Wait for shutdown signal
@@ -143,13 +153,15 @@ async def start_daemon_mode():
 
 async def run_maintenance_tasks():
     """
-    Run periodic maintenance tasks.
+    Run periodic maintenance tasks based on configured interval.
     """
+    maintenance_interval = config.MAINTENANCE_INTERVAL_HOURS * 3600  # Convert to seconds
+    
     try:
         while not shutdown_event.is_set():
             try:
-                # Wait for 1 hour or until shutdown
-                await asyncio.wait_for(shutdown_event.wait(), timeout=3600)
+                # Wait for configured interval or until shutdown
+                await asyncio.wait_for(shutdown_event.wait(), timeout=maintenance_interval)
                 break  # Shutdown event was set
             except asyncio.TimeoutError:
                 # Timeout occurred, run maintenance
@@ -158,21 +170,22 @@ async def run_maintenance_tasks():
             trigger_sys = await get_trigger_system()
             logger.info("Running periodic maintenance tasks...")
             
-            # Clean up old completed jobs (older than 24 hours)
+            # Clean up old completed jobs (configured retention)
             try:
-                cleaned_count = await trigger_sys.cleanup_old_jobs(hours=24)
+                cleaned_count = await trigger_sys.cleanup_old_jobs(hours=config.JOB_CLEANUP_RETENTION_HOURS)
                 logger.info(f"Maintenance: Cleaned up {cleaned_count} old jobs")
             except Exception as ex:
                 logger.error(f"Maintenance error during cleanup: {ex}")
             
             # Log system performance metrics
-            try:
-                metrics = await trigger_sys.get_processing_performance_metrics()
-                processed = metrics.get("performance", {}).get("total_jobs_processed", 0)
-                avg_time = metrics.get("performance", {}).get("average_processing_time", 0)
-                logger.info(f"Performance: {processed} jobs processed, avg time: {avg_time:.2f}s")
-            except Exception as ex:
-                logger.error(f"Maintenance error getting metrics: {ex}")
+            if config.ENABLE_PERFORMANCE_MONITORING:
+                try:
+                    metrics = await trigger_sys.get_processing_performance_metrics()
+                    processed = metrics.get("performance", {}).get("total_jobs_processed", 0)
+                    avg_time = metrics.get("performance", {}).get("average_processing_time", 0)
+                    logger.info(f"Performance: {processed} jobs processed, avg time: {avg_time:.2f}s")
+                except Exception as ex:
+                    logger.error(f"Maintenance error getting metrics: {ex}")
                 
     except asyncio.CancelledError:
         logger.info("Maintenance tasks cancelled")
@@ -237,9 +250,10 @@ async def handle_preprocess(args):
     if args.dry_run:
         candidates = await cleaner.get_cleanup_candidates_count()
         logger.info(f"Cleanup candidates found:")
-        logger.info(f"  - Records with < 4 images: {candidates['insufficient_images']}")
+        logger.info(f"  - Records with < {config.MIN_IMAGES_REQUIRED} images: {candidates['insufficient_images']}")
         logger.info(f"  - Records with invalid emissions: {candidates['invalid_emissions']}")
         logger.info(f"  - Total candidates: {candidates['total_candidates']}")
+        logger.info(f"  - Protected by processing: {candidates.get('protected_by_processing', 0)}")
         logger.info("Use --preprocess without --dry-run to actually delete these records")
     else:
         # Actually run cleanup
@@ -269,6 +283,14 @@ async def handle_status():
     print(f"Active Sites: {status['site_count']}")
     print(f"Sites: {', '.join(status['active_sites'])}")
     print(f"Timestamp: {status['timestamp']}")
+    
+    # Show configuration summary
+    config_summary = config.summary()
+    print(f"\n=== Configuration ===")
+    print(f"Workers: {config_summary['processing']['max_workers']}")
+    print(f"Batch Size: {config_summary['processing']['batch_size']}")
+    print(f"Cleanup Interval: {config_summary['maintenance']['cleanup_hours']}h")
+    print(f"Min Images: {config_summary['data_quality']['min_images']}")
     
     print("\n=== Processing Queue Status ===")
     pq_stats = status.get('processing_queue', {})
@@ -331,7 +353,7 @@ async def handle_test_one(args):
     # Test basic cleaning (using utils_filters now)
     is_clean = is_record_clean(raw)
     if not is_clean:
-        print("❌ Record failed basic quality validation")
+        print(f"❌ Record failed basic quality validation (min {config.MIN_IMAGES_REQUIRED} images required)")
         return
     
     print("✅ Record passed basic quality validation")
@@ -393,7 +415,7 @@ async def handle_cleanup_jobs(args):
     Clean up old completed jobs.
     """
     pq = await get_processing_queue()
-    hours = args.hours or 24
+    hours = args.hours or config.JOB_CLEANUP_RETENTION_HOURS
     count = await pq.cleanup_completed_jobs(older_than_hours=hours)
     print(f"Cleaned up {count} completed jobs older than {hours} hours")
 
@@ -406,7 +428,7 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Start daemon mode (production) - includes 8-hour periodic cleanup
+  # Start daemon mode (production) - includes periodic cleanup
   python main.py --daemon
   
   # Manual preprocessing (database cleanup)
@@ -453,7 +475,7 @@ Examples:
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
     
     # Logging
-    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--log-level", default=config.LOG_LEVEL, choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     
     args = parser.parse_args()
     
@@ -465,7 +487,7 @@ Examples:
     logger.remove()
     logger.add(sys.stdout, level=args.log_level)
     if args.site:
-        logger.add(f"./logs/{args.site}.log", rotation="10 MB", retention="7 days", level=args.log_level)
+        logger.add(f"./logs/{args.site}.log", rotation=config.LOG_ROTATION_SIZE, retention=config.LOG_RETENTION_DAYS, level=args.log_level)
     
     # Setup signal handlers for daemon mode
     if args.daemon:

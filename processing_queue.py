@@ -4,6 +4,8 @@ processing_queue.py
 Queued processing system for rawprocessor Stage 1.
 Handles high-volume raw changes and site settings changes through a robust queue system.
 
+UPDATED: Now uses centralized configuration system instead of hard-coded values.
+
 Architecture:
 Raw/Settings Change → Queue Processing Job → Worker Processes → Update Processed → Trigger WP Jobs
 
@@ -26,6 +28,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
 from bson import ObjectId
 
+from config import config
 from site_settings import SiteSettings
 from processor import Processor
 from cleaner import Cleaner
@@ -53,9 +56,9 @@ class ProcessingJob:
     priority: int = 5  # 1=highest, 10=lowest
     payload: Dict[str, Any] = None
     batch_size: int = 1
-    max_retries: int = 3
-    retry_delay_seconds: int = 60
-    timeout_seconds: int = 300
+    max_retries: int = None  # Will use config default
+    retry_delay_seconds: int = None  # Will use config default
+    timeout_seconds: int = None  # Will use config default
     
     # Runtime fields
     job_id: Optional[str] = None
@@ -66,6 +69,15 @@ class ProcessingJob:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    
+    def __post_init__(self):
+        """Set defaults from config if not provided."""
+        if self.max_retries is None:
+            self.max_retries = config.QUEUE_RETRY_LIMIT
+        if self.retry_delay_seconds is None:
+            self.retry_delay_seconds = config.QUEUE_RETRY_DELAY
+        if self.timeout_seconds is None:
+            self.timeout_seconds = config.QUEUE_TIMEOUT_SHORT
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to MongoDB document."""
@@ -101,11 +113,11 @@ class ProcessingQueue:
         self.workers_running = False
         self.worker_tasks: List[asyncio.Task] = []
         
-        # Configuration
-        self.max_workers = 5  # Concurrent workers
-        self.batch_size = 50  # Records per batch for bulk operations
-        self.poll_interval = 1.0  # Seconds between queue polls
-        self.max_processing_time = 300  # Seconds before job timeout
+        # Configuration from config system
+        self.max_workers = config.QUEUE_MAX_WORKERS
+        self.batch_size = config.QUEUE_BATCH_SIZE
+        self.poll_interval = config.QUEUE_POLL_INTERVAL
+        self.max_processing_time = config.QUEUE_MAX_PROCESSING_TIME
         
         # Metrics
         self.stats = {
@@ -115,6 +127,8 @@ class ProcessingQueue:
             'processing_time_total': 0.0,
             'last_activity': None
         }
+        
+        logger.info(f"ProcessingQueue initialized with config: workers={self.max_workers}, batch={self.batch_size}, poll={self.poll_interval}s")
 
     async def initialize(self):
         """Initialize the processing queue system."""
@@ -143,9 +157,26 @@ class ProcessingQueue:
         try:
             cursor = self.db.site_settings.find({})
             async for site_doc in cursor:
-                site_key = site_doc.get("site_url", "").replace(".nl", "").replace(".", "_")
-                if site_key:
-                    self.processors[site_key] = Processor(self.db, site_key)
+                site_url = site_doc.get("site_url", "")
+                if site_url:
+                    # Use the same site key extraction as in queued_trigger_system
+                    import re
+                    clean_url = site_url.lower().strip()
+                    clean_url = re.sub(r'^https?://', '', clean_url)
+                    clean_url = re.sub(r'^www\.', '', clean_url)
+                    clean_url = clean_url.split('/')[0]
+                    
+                    parts = clean_url.split('.')
+                    if len(parts) >= 2:
+                        domain_part = '.'.join(parts[:-1])
+                    else:
+                        domain_part = clean_url
+                    
+                    site_key = re.sub(r'[^\w]', '_', domain_part)
+                    site_key = re.sub(r'_+', '_', site_key).strip('_')
+                    
+                    if site_key and re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', site_key):
+                        self.processors[site_key] = Processor(self.db, site_key)
             
             logger.info(f"Initialized processors for {len(self.processors)} sites")
             
@@ -199,6 +230,7 @@ class ProcessingQueue:
                 job_type=job_type,
                 site=site,
                 priority=3 if job_type == JobType.RAW_PRICE_CHANGE else 5,
+                timeout_seconds=config.QUEUE_TIMEOUT_SHORT,
                 payload={
                     "car_id": car_id,
                     "raw_document": raw_document,
@@ -226,7 +258,7 @@ class ProcessingQueue:
             job_type = JobType.SITE_REBUILD
             priority = 6  # Lower priority
         
-        if batch_processing:
+        if batch_processing and config.ENABLE_BATCH_PROCESSING:
             # For large operations, process in batches
             total_records = await self.db.raw.count_documents({"listing_status": True})
             batch_count = (total_records + self.batch_size - 1) // self.batch_size
@@ -238,14 +270,14 @@ class ProcessingQueue:
                     site=site,
                     priority=priority,
                     batch_size=self.batch_size,
+                    timeout_seconds=config.QUEUE_TIMEOUT_MEDIUM,
                     payload={
                         "change_type": change_type,
                         "batch_number": batch_num,
                         "total_batches": batch_count,
                         "skip": batch_num * self.batch_size,
                         "limit": self.batch_size
-                    },
-                    timeout_seconds=600  # Longer timeout for batch jobs
+                    }
                 )
                 job_id = await self.enqueue_job(job)
                 job_ids.append(job_id)
@@ -258,8 +290,8 @@ class ProcessingQueue:
                 job_type=job_type,
                 site=site,
                 priority=priority,
-                payload={"change_type": change_type},
-                timeout_seconds=1800  # 30 minutes for full site operations
+                timeout_seconds=config.QUEUE_TIMEOUT_LONG,
+                payload={"change_type": change_type}
             )
             job_id = await self.enqueue_job(job)
             logger.info(f"Enqueued single job for {job_type.value} on site {site}")
@@ -551,9 +583,9 @@ class ProcessingQueue:
             scheduled_at = None
             logger.warning(f"Job {job.job_id} moved to dead letter queue after {job.retries} retries")
         else:
-            # Schedule for retry
+            # Schedule for retry with exponential backoff
             status = JobStatus.PENDING.value
-            scheduled_at = datetime.utcnow() + timedelta(seconds=job.retry_delay_seconds * (2 ** (job.retries - 1)))  # Exponential backoff
+            scheduled_at = datetime.utcnow() + timedelta(seconds=job.retry_delay_seconds * (2 ** (job.retries - 1)))
             self.stats['jobs_retried'] += 1
             logger.info(f"Job {job.job_id} scheduled for retry {job.retries}/{job.max_retries} at {scheduled_at}")
         
@@ -610,6 +642,15 @@ class ProcessingQueue:
                 "workers_running": self.workers_running,
                 "active_workers": len(self.worker_tasks),
                 "processing_stats": self.stats,
+                "configuration": {
+                    "max_workers": self.max_workers,
+                    "batch_size": self.batch_size,
+                    "poll_interval": self.poll_interval,
+                    "timeout_short": config.QUEUE_TIMEOUT_SHORT,
+                    "timeout_medium": config.QUEUE_TIMEOUT_MEDIUM,
+                    "timeout_long": config.QUEUE_TIMEOUT_LONG,
+                    "retry_limit": config.QUEUE_RETRY_LIMIT
+                },
                 "timestamp": datetime.utcnow().isoformat()
             }
             
@@ -617,17 +658,18 @@ class ProcessingQueue:
             logger.error(f"Error getting queue stats: {ex}")
             return {"error": str(ex)}
 
-    async def cleanup_completed_jobs(self, older_than_hours: int = 24):
+    async def cleanup_completed_jobs(self, older_than_hours: int = None):
         """Clean up completed jobs older than specified hours."""
         try:
-            cutoff_time = datetime.utcnow() - timedelta(hours=older_than_hours)
+            hours = older_than_hours or config.JOB_CLEANUP_RETENTION_HOURS
+            cutoff_time = datetime.utcnow() - timedelta(hours=hours)
             
             result = await self.collection.delete_many({
                 "status": JobStatus.COMPLETED.value,
                 "completed_at": {"$lt": cutoff_time}
             })
             
-            logger.info(f"Cleaned up {result.deleted_count} completed jobs older than {older_than_hours} hours")
+            logger.info(f"Cleaned up {result.deleted_count} completed jobs older than {hours} hours")
             return result.deleted_count
             
         except Exception as ex:
@@ -640,7 +682,7 @@ class ProcessingQueue:
             result = await self.collection.update_many(
                 {
                     "status": JobStatus.FAILED.value,
-                    "retries": {"$lt": 3}
+                    "retries": {"$lt": config.QUEUE_RETRY_LIMIT}
                 },
                 {
                     "$set": {

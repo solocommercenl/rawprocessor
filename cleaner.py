@@ -2,16 +2,18 @@
 cleaner.py
 
 Periodic database cleaner for rawprocessor.
-Runs every 8 hours to delete invalid records from raw collection.
+Runs based on configured interval to delete invalid records from raw collection.
 This is a true preprocessor that maintains database cleanliness.
 
-FIXED: Added processing queue checks to prevent race conditions.
+UPDATED: Now uses centralized configuration system and includes race condition prevention.
 """
 
 from typing import Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
 from datetime import datetime
+
+from config import config
 
 class Cleaner:
     """
@@ -25,20 +27,25 @@ class Cleaner:
         :param db: MongoDB database instance.
         """
         self.db = db
+        self.min_images_required = config.MIN_IMAGES_REQUIRED
+        self.emissions_threshold = config.EMISSIONS_ZERO_THRESHOLD
+        
+        logger.info(f"Cleaner initialized with config: min_images={self.min_images_required}, emissions_threshold={self.emissions_threshold}")
 
     async def cleanup_raw_collection(self) -> Dict[str, Any]:
         """
         Periodic database cleanup - actually DELETE bad records from raw collection.
         
-        FIXED: Now checks processing queue to avoid deleting records that are being processed.
+        Uses configuration values for data quality thresholds.
+        Checks processing queue to avoid deleting records that are being processed.
         
         Deletes records that fail basic quality requirements:
-        1. Records with < 4 images (excluding those being processed)
-        2. Records with 0 emissions AND not electric fuel type (excluding those being processed)
+        1. Records with < configured minimum images
+        2. Records with emissions at threshold AND not electric fuel type
         
         :return: Dictionary with cleanup statistics
         """
-        logger.info("Starting periodic raw collection cleanup...")
+        logger.info(f"Starting periodic raw collection cleanup (min_images={self.min_images_required})...")
         start_time = datetime.utcnow()
         
         stats = {
@@ -49,7 +56,11 @@ class Cleaner:
             "total_before": 0,
             "total_after": 0,
             "total_deleted": 0,
-            "duration_seconds": 0
+            "duration_seconds": 0,
+            "config_used": {
+                "min_images_required": self.min_images_required,
+                "emissions_threshold": self.emissions_threshold
+            }
         }
         
         try:
@@ -62,10 +73,10 @@ class Cleaner:
             stats["skipped_processing"] = len(processing_car_ids)
             logger.info(f"Found {stats['skipped_processing']} records currently being processed - will skip these")
             
-            # 1. Delete records with < 4 images (excluding those being processed)
-            logger.info("Deleting records with insufficient images...")
+            # 1. Delete records with < configured minimum images (excluding those being processed)
+            logger.info(f"Deleting records with < {self.min_images_required} images...")
             delete_query_images = {
-                "$expr": {"$lt": [{"$size": {"$ifNull": ["$Images", []]}}, 4]}
+                "$expr": {"$lt": [{"$size": {"$ifNull": ["$Images", []]}}, self.min_images_required]}
             }
             
             # Add exclusion for records being processed
@@ -74,12 +85,12 @@ class Cleaner:
             
             result_images = await self.db.raw.delete_many(delete_query_images)
             stats["deleted_images"] = result_images.deleted_count
-            logger.info(f"Deleted {stats['deleted_images']} records with < 4 images")
+            logger.info(f"Deleted {stats['deleted_images']} records with < {self.min_images_required} images")
             
-            # 2. Delete records with 0 emissions AND not electric fuel type (excluding those being processed)
-            logger.info("Deleting records with invalid emissions...")
+            # 2. Delete records with emissions at threshold AND not electric fuel type (excluding those being processed)
+            logger.info(f"Deleting records with emissions = {self.emissions_threshold} and not electric...")
             delete_query_emissions = {
-                "energyconsumption.raw_emissions": 0,
+                "energyconsumption.raw_emissions": self.emissions_threshold,
                 "energyconsumption.Fueltype": {"$not": {"$regex": "Electric", "$options": "i"}}
             }
             
@@ -148,7 +159,8 @@ class Cleaner:
         Get count of records that would be deleted by cleanup (for reporting).
         Does not delete anything, just counts.
         
-        FIXED: Now accounts for records being processed.
+        Uses configuration values for thresholds.
+        Accounts for records being processed.
         
         :return: Dictionary with counts of records that would be deleted
         """
@@ -156,18 +168,18 @@ class Cleaner:
             # Get processing car_ids to exclude them from counts
             processing_car_ids = await self._get_processing_car_ids()
             
-            # Count records with < 4 images (excluding those being processed)
+            # Count records with < configured minimum images (excluding those being processed)
             images_query = {
-                "$expr": {"$lt": [{"$size": {"$ifNull": ["$Images", []]}}, 4]}
+                "$expr": {"$lt": [{"$size": {"$ifNull": ["$Images", []]}}, self.min_images_required]}
             }
             if processing_car_ids:
                 images_query["car_id"] = {"$nin": processing_car_ids}
             
             images_count = await self.db.raw.count_documents(images_query)
             
-            # Count records with 0 emissions AND not electric (excluding those being processed)
+            # Count records with emissions at threshold AND not electric (excluding those being processed)
             emissions_query = {
-                "energyconsumption.raw_emissions": 0,
+                "energyconsumption.raw_emissions": self.emissions_threshold,
                 "energyconsumption.Fueltype": {"$not": {"$regex": "Electric", "$options": "i"}}
             }
             if processing_car_ids:
@@ -179,7 +191,11 @@ class Cleaner:
                 "insufficient_images": images_count,
                 "invalid_emissions": emissions_count,
                 "total_candidates": images_count + emissions_count,
-                "protected_by_processing": len(processing_car_ids)
+                "protected_by_processing": len(processing_car_ids),
+                "config_used": {
+                    "min_images_required": self.min_images_required,
+                    "emissions_threshold": self.emissions_threshold
+                }
             }
             
         except Exception as ex:
@@ -189,5 +205,40 @@ class Cleaner:
                 "invalid_emissions": 0,
                 "total_candidates": 0,
                 "protected_by_processing": 0,
+                "config_used": {
+                    "min_images_required": self.min_images_required,
+                    "emissions_threshold": self.emissions_threshold
+                },
                 "error": str(ex)
             }
+
+    async def validate_cleanup_configuration(self) -> Dict[str, Any]:
+        """
+        Validate that cleanup configuration is sensible.
+        
+        :return: Validation results
+        """
+        issues = []
+        warnings = []
+        
+        # Check minimum images requirement
+        if self.min_images_required < 1:
+            issues.append(f"MIN_IMAGES_REQUIRED ({self.min_images_required}) must be at least 1")
+        elif self.min_images_required > 10:
+            warnings.append(f"MIN_IMAGES_REQUIRED ({self.min_images_required}) is quite high - many records may be deleted")
+        
+        # Check emissions threshold
+        if self.emissions_threshold < 0:
+            issues.append(f"EMISSIONS_ZERO_THRESHOLD ({self.emissions_threshold}) cannot be negative")
+        elif self.emissions_threshold > 50:
+            warnings.append(f"EMISSIONS_ZERO_THRESHOLD ({self.emissions_threshold}) is high - may affect valid records")
+        
+        return {
+            "valid": len(issues) == 0,
+            "issues": issues,
+            "warnings": warnings,
+            "configuration": {
+                "min_images_required": self.min_images_required,
+                "emissions_threshold": self.emissions_threshold
+            }
+        }

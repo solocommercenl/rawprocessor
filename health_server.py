@@ -4,31 +4,19 @@ health_server.py
 Enhanced health check HTTP server for rawprocessor service monitoring.
 Supports configurable host/port and optional authentication.
 
-FIXED: Motor database boolean evaluation issues.
+UPDATED: Now uses centralized configuration system and improved security.
 """
 
 import asyncio
-import os
 import sys
 import base64
-import hashlib
 from datetime import datetime, timedelta
 from aiohttp import web, ClientTimeout
 from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
 import json
 import psutil
 
-# Load environment
-load_dotenv()
-MONGO_URI = os.environ.get("MONGO_URI")
-DB_NAME = os.environ.get("MONGO_DB", "autodex")
-
-# Health server configuration from environment
-HEALTH_HOST = os.environ.get("HEALTH_HOST", "localhost")  # Set to "0.0.0.0" for all interfaces
-HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "8080"))
-HEALTH_AUTH_USER = os.environ.get("HEALTH_AUTH_USER")  # Optional basic auth
-HEALTH_AUTH_PASS = os.environ.get("HEALTH_AUTH_PASS")  # Optional basic auth
+from config import config
 
 class HealthChecker:
     def __init__(self):
@@ -39,8 +27,11 @@ class HealthChecker:
     async def initialize(self):
         """Initialize database connection for health checks."""
         try:
-            self.client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-            self.db = self.client[DB_NAME]
+            self.client = AsyncIOMotorClient(
+                config.MONGO_URI, 
+                serverSelectionTimeoutMS=config.HEALTH_TIMEOUT
+            )
+            self.db = self.client[config.MONGO_DB]
             # Test connection
             await self.client.admin.command('ping')
             print(f"Health server connected to MongoDB at {datetime.utcnow()}")
@@ -82,11 +73,12 @@ class HealthChecker:
             failed_jobs = await self.db.processing_queue.count_documents({"status": "failed"})
             processing_jobs = await self.db.processing_queue.count_documents({"status": "processing"})
             
-            # Check for stuck jobs (processing for more than 30 minutes)
-            thirty_min_ago = datetime.utcnow() - timedelta(minutes=30)
+            # Check for stuck jobs (processing for more than configured timeout)
+            timeout_minutes = config.QUEUE_MAX_PROCESSING_TIME // 60
+            timeout_ago = datetime.utcnow() - timedelta(minutes=timeout_minutes)
             stuck_jobs = await self.db.processing_queue.count_documents({
                 "status": "processing",
-                "started_at": {"$lt": thirty_min_ago}
+                "started_at": {"$lt": timeout_ago}
             })
             
             status = "healthy"
@@ -107,7 +99,12 @@ class HealthChecker:
                 "processing": processing_jobs,
                 "failed": failed_jobs,
                 "stuck": stuck_jobs,
-                "warnings": warnings
+                "warnings": warnings,
+                "configuration": {
+                    "max_workers": config.QUEUE_MAX_WORKERS,
+                    "batch_size": config.QUEUE_BATCH_SIZE,
+                    "timeout_minutes": timeout_minutes
+                }
             }
         except Exception as ex:
             return {"status": "error", "message": str(ex)}
@@ -196,12 +193,49 @@ class HealthChecker:
         except Exception as ex:
             return {"status": "error", "message": str(ex)}
 
+    async def check_configuration(self):
+        """Check configuration health and consistency."""
+        try:
+            warnings = []
+            issues = []
+            
+            # Check critical configuration
+            if not config.MONGO_URI:
+                issues.append("MONGO_URI not configured")
+            
+            if config.QUEUE_MAX_WORKERS < 1:
+                issues.append(f"QUEUE_MAX_WORKERS ({config.QUEUE_MAX_WORKERS}) must be at least 1")
+            
+            if config.MIN_IMAGES_REQUIRED < 1:
+                issues.append(f"MIN_IMAGES_REQUIRED ({config.MIN_IMAGES_REQUIRED}) must be at least 1")
+            
+            # Check for potential issues
+            if config.QUEUE_MAX_WORKERS > 20:
+                warnings.append(f"High worker count ({config.QUEUE_MAX_WORKERS}) may cause resource issues")
+            
+            if config.HEALTH_HOST == "0.0.0.0" and not config.HEALTH_AUTH_USER:
+                warnings.append("Health server exposed publicly without authentication")
+            
+            if config.CLEANUP_INTERVAL_HOURS < 1:
+                warnings.append(f"Very frequent cleanup interval ({config.CLEANUP_INTERVAL_HOURS}h)")
+            
+            status = "error" if issues else ("warning" if warnings else "healthy")
+            
+            return {
+                "status": status,
+                "issues": issues,
+                "warnings": warnings,
+                "config_summary": config.summary()
+            }
+        except Exception as ex:
+            return {"status": "error", "message": str(ex)}
+
 # Global health checker instance
 health_checker = HealthChecker()
 
 def check_auth(request):
     """Check basic authentication if configured."""
-    if not HEALTH_AUTH_USER or not HEALTH_AUTH_PASS:
+    if not config.HEALTH_AUTH_USER or not config.HEALTH_AUTH_PASS:
         return True  # No auth required
     
     auth_header = request.headers.get('Authorization')
@@ -214,7 +248,7 @@ def check_auth(request):
         decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
         username, password = decoded_credentials.split(':', 1)
         
-        return username == HEALTH_AUTH_USER and password == HEALTH_AUTH_PASS
+        return username == config.HEALTH_AUTH_USER and password == config.HEALTH_AUTH_PASS
     except:
         return False
 
@@ -230,6 +264,22 @@ async def auth_middleware(request, handler):
     
     return await handler(request)
 
+@web.middleware
+async def security_middleware(request, handler):
+    """Security headers middleware."""
+    response = await handler(request)
+    
+    # Add security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    
+    # Warn about public exposure without auth
+    if config.HEALTH_HOST == "0.0.0.0" and not config.HEALTH_AUTH_USER:
+        response.headers['X-Security-Warning'] = 'Public exposure without authentication'
+    
+    return response
+
 async def health_endpoint(request):
     """Main health check endpoint."""
     try:
@@ -238,13 +288,15 @@ async def health_endpoint(request):
         queue_health = await health_checker.check_processing_queue()
         wp_health = await health_checker.check_wp_queues()
         system_health = await health_checker.check_system_resources()
+        config_health = await health_checker.check_configuration()
         
         # Determine overall status
         statuses = [
             mongodb_health.get("status"),
             queue_health.get("status"),
             wp_health.get("status"),
-            system_health.get("status")
+            system_health.get("status"),
+            config_health.get("status")
         ]
         
         if "error" in statuses:
@@ -261,15 +313,16 @@ async def health_endpoint(request):
             "timestamp": datetime.utcnow().isoformat(),
             "uptime_seconds": uptime_seconds,
             "server_info": {
-                "host": HEALTH_HOST,
-                "port": HEALTH_PORT,
-                "auth_enabled": bool(HEALTH_AUTH_USER)
+                "host": config.HEALTH_HOST,
+                "port": config.HEALTH_PORT,
+                "auth_enabled": bool(config.HEALTH_AUTH_USER)
             },
             "checks": {
                 "mongodb": mongodb_health,
                 "processing_queue": queue_health,
                 "wp_queues": wp_health,
-                "system": system_health
+                "system": system_health,
+                "configuration": config_health
             }
         }
         
@@ -321,6 +374,9 @@ async def metrics_endpoint(request):
             f'rawprocessor_memory_percent {system_health.get("memory_percent", 0)}',
             f'rawprocessor_cpu_percent {system_health.get("cpu_percent", 0)}',
             f'rawprocessor_disk_percent {system_health.get("disk_percent", 0)}',
+            f'rawprocessor_config_max_workers {config.QUEUE_MAX_WORKERS}',
+            f'rawprocessor_config_batch_size {config.QUEUE_BATCH_SIZE}',
+            f'rawprocessor_config_min_images {config.MIN_IMAGES_REQUIRED}',
         ]
         
         return web.Response(text='\n'.join(metrics) + '\n', content_type='text/plain')
@@ -328,19 +384,41 @@ async def metrics_endpoint(request):
     except Exception as ex:
         return web.Response(text=f'# Error: {ex}\n', content_type='text/plain', status=503)
 
+async def config_endpoint(request):
+    """Configuration information endpoint."""
+    try:
+        config_summary = config.summary()
+        
+        # Redact sensitive information
+        if 'database' in config_summary and 'uri_configured' in config_summary['database']:
+            config_summary['database']['uri'] = '***REDACTED***' if config_summary['database']['uri_configured'] else 'NOT_SET'
+        
+        return web.json_response({
+            "configuration": config_summary,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=500)
+
 async def info_endpoint(request):
     """Information endpoint showing configuration."""
     info = {
         "service": "rawprocessor-health",
         "version": "1.0.0",
-        "host": HEALTH_HOST,
-        "port": HEALTH_PORT,
-        "auth_enabled": bool(HEALTH_AUTH_USER),
+        "host": config.HEALTH_HOST,
+        "port": config.HEALTH_PORT,
+        "auth_enabled": bool(config.HEALTH_AUTH_USER),
         "endpoints": {
             "/health": "Comprehensive health check",
             "/ready": "Simple readiness check",
             "/metrics": "Prometheus metrics",
+            "/config": "Configuration summary",
             "/info": "Service information"
+        },
+        "features": {
+            "batch_processing": config.ENABLE_BATCH_PROCESSING,
+            "periodic_cleanup": config.ENABLE_PERIODIC_CLEANUP,
+            "performance_monitoring": config.ENABLE_PERFORMANCE_MONITORING
         }
     }
     return web.json_response(info)
@@ -351,14 +429,20 @@ async def init_app():
     
     app = web.Application()
     
+    # Add security middleware
+    app.middlewares.append(security_middleware)
+    
     # Add auth middleware if authentication is configured
-    if HEALTH_AUTH_USER and HEALTH_AUTH_PASS:
+    if config.HEALTH_AUTH_USER and config.HEALTH_AUTH_PASS:
         app.middlewares.append(auth_middleware)
-        print(f"Authentication enabled for user: {HEALTH_AUTH_USER}")
+        print(f"Authentication enabled for user: {config.HEALTH_AUTH_USER}")
+    elif config.HEALTH_HOST == "0.0.0.0":
+        print("⚠️  WARNING: Health server exposed publicly WITHOUT authentication!")
     
     app.router.add_get('/health', health_endpoint)
     app.router.add_get('/ready', ready_endpoint)
     app.router.add_get('/metrics', metrics_endpoint)
+    app.router.add_get('/config', config_endpoint)
     app.router.add_get('/info', info_endpoint)
     app.router.add_get('/', info_endpoint)  # Default route
     
@@ -369,20 +453,25 @@ async def main():
     try:
         app = await init_app()
         
-        print(f"Starting health check server on {HEALTH_HOST}:{HEALTH_PORT}")
+        print(f"Starting health check server on {config.HEALTH_HOST}:{config.HEALTH_PORT}")
         print("Endpoints available:")
         print("  /health  - Comprehensive health check")
         print("  /ready   - Simple readiness check")
         print("  /metrics - Prometheus metrics")
+        print("  /config  - Configuration summary")
         print("  /info    - Service information")
         
-        if HEALTH_HOST == "0.0.0.0":
-            print("⚠️  Server listening on ALL interfaces - ensure proper firewall configuration!")
+        if config.HEALTH_HOST == "0.0.0.0":
+            if config.HEALTH_AUTH_USER:
+                print("🔒 Server listening on ALL interfaces with authentication")
+            else:
+                print("⚠️  Server listening on ALL interfaces WITHOUT authentication!")
+                print("   Consider setting HEALTH_AUTH_USER and HEALTH_AUTH_PASS")
         
         runner = web.AppRunner(app)
         await runner.setup()
         
-        site = web.TCPSite(runner, HEALTH_HOST, HEALTH_PORT)
+        site = web.TCPSite(runner, config.HEALTH_HOST, config.HEALTH_PORT)
         await site.start()
         
         # Keep the server running
@@ -396,4 +485,8 @@ async def main():
         sys.exit(1)
 
 if __name__ == '__main__':
+    if not config.ENABLE_HEALTH_SERVER:
+        print("Health server disabled by configuration (ENABLE_HEALTH_SERVER=false)")
+        sys.exit(0)
+    
     asyncio.run(main())

@@ -4,35 +4,39 @@ utils_filters.py
 Enhanced filtering utilities for rawprocessor.
 Contains both basic data quality checks and comprehensive site-specific filtering logic.
 Used during processing for immediate validation without database operations.
+
+UPDATED: Now uses centralized configuration system for data quality thresholds.
 """
 
 from loguru import logger
 from typing import Dict, Any
+
+from config import config
 
 def is_record_clean(record: dict) -> bool:
     """
     Fast validation - check if record meets basic quality standards.
     Used during processing to skip bad records immediately.
     
-    Validates:
-    1. Record has >= 4 images 
-    2. If emissions = 0, fuel type must be Electric
+    Uses configuration values for quality thresholds:
+    1. Record has >= configured minimum images 
+    2. If emissions = configured threshold, fuel type must be Electric
     
     :param record: Raw record dictionary
     :return: True if record passes basic quality checks, False otherwise
     """
-    # Check 1: Images count (your requirement)
+    # Check 1: Images count (configurable requirement)
     images = record.get("Images", [])
-    if not images or len(images) < 4:
+    if not images or len(images) < config.MIN_IMAGES_REQUIRED:
         return False
     
-    # Check 2: Emissions validation (your requirement)
+    # Check 2: Emissions validation (configurable threshold)
     energy_data = record.get("energyconsumption", {})
     fuel_type = energy_data.get("Fueltype", "").strip()
     raw_emissions = energy_data.get("raw_emissions")
     
-    # If emissions is 0 and not electric, it's invalid
-    if raw_emissions == 0 and "Electric" not in fuel_type:
+    # If emissions is at threshold and not electric, it's invalid
+    if raw_emissions == config.EMISSIONS_ZERO_THRESHOLD and "Electric" not in fuel_type:
         return False
     
     return True
@@ -223,3 +227,43 @@ def get_filter_summary(filter_criteria: Dict[str, Any]) -> Dict[str, Any]:
             summary["requirements"].append(f"{field}: required")
     
     return summary
+
+
+def get_data_quality_config_summary() -> Dict[str, Any]:
+    """
+    Get summary of data quality configuration being used.
+    
+    :return: Configuration summary
+    """
+    return {
+        "min_images_required": config.MIN_IMAGES_REQUIRED,
+        "emissions_threshold": config.EMISSIONS_ZERO_THRESHOLD,
+        "source": "configuration system"
+    }
+
+
+def validate_data_quality_config() -> Dict[str, Any]:
+    """
+    Validate that data quality configuration is sensible.
+    
+    :return: Validation results
+    """
+    issues = []
+    warnings = []
+    
+    # Check minimum images requirement
+    if config.MIN_IMAGES_REQUIRED < 1:
+        issues.append(f"MIN_IMAGES_REQUIRED ({config.MIN_IMAGES_REQUIRED}) must be at least 1")
+    elif config.MIN_IMAGES_REQUIRED > 20:
+        warnings.append(f"MIN_IMAGES_REQUIRED ({config.MIN_IMAGES_REQUIRED}) is very high - most records may be rejected")
+    
+    # Check emissions threshold
+    if config.EMISSIONS_ZERO_THRESHOLD < 0:
+        issues.append(f"EMISSIONS_ZERO_THRESHOLD ({config.EMISSIONS_ZERO_THRESHOLD}) cannot be negative")
+    
+    return {
+        "valid": len(issues) == 0,
+        "issues": issues,
+        "warnings": warnings,
+        "configuration": get_data_quality_config_summary()
+    }
