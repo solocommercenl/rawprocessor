@@ -4,6 +4,8 @@ queued_trigger_system.py
 Updated trigger system that uses the processing queue for handling raw changes and site settings.
 This provides better performance and reliability for high-volume operations.
 
+FIXED: Robust site detection logic that works with any domain format.
+
 Architecture:
 Raw Changes → Queue Processing Jobs → Workers Update Processed → Processed Changes → Queue WP Jobs
 Site Settings → Queue Processing Jobs → Workers Update Processed → Processed Changes → Queue WP Jobs
@@ -20,6 +22,65 @@ from utils_filters import check_raw_against_filters
 from processing_queue import ProcessingQueue, ProcessingJob, JobType
 from jobqueue import WPQueue
 
+# Import the new robust site detection
+def extract_site_key(site_url: str) -> str:
+    """
+    Extract a consistent site key from any domain format.
+    
+    Examples:
+    - "solostaging.nl" -> "solostaging"
+    - "mysite.com" -> "mysite" 
+    - "sub.domain.co.uk" -> "sub_domain"
+    """
+    import re
+    
+    if not site_url or not isinstance(site_url, str):
+        return ""
+    
+    try:
+        # Remove protocol if present
+        clean_url = site_url.lower().strip()
+        clean_url = re.sub(r'^https?://', '', clean_url)
+        clean_url = re.sub(r'^www\.', '', clean_url)
+        
+        # Remove trailing slash and path
+        clean_url = clean_url.split('/')[0]
+        
+        # Split by dots and remove TLD (last part)
+        parts = clean_url.split('.')
+        
+        if len(parts) < 2:
+            # No TLD found, use as-is
+            domain_part = clean_url
+        else:
+            # Remove the TLD (last part)
+            domain_part = '.'.join(parts[:-1])
+        
+        # Convert to valid identifier
+        # Replace dots, hyphens, and other special chars with underscores
+        site_key = re.sub(r'[^\w]', '_', domain_part)
+        
+        # Remove multiple consecutive underscores
+        site_key = re.sub(r'_+', '_', site_key)
+        
+        # Remove leading/trailing underscores
+        site_key = site_key.strip('_')
+        
+        # Validate result - must start with letter
+        if not site_key or not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', site_key):
+            logger.warning(f"Generated invalid site key '{site_key}' from '{site_url}', using fallback")
+            # Fallback: use first part before first dot
+            fallback = clean_url.split('.')[0]
+            site_key = re.sub(r'[^\w]', '_', fallback)
+            if not re.match(r'^[a-zA-Z]', site_key):
+                site_key = f"site_{site_key}"
+        
+        return site_key
+        
+    except Exception as ex:
+        logger.error(f"Error extracting site key from '{site_url}': {ex}")
+        return f"site_{hash(site_url) % 10000}"  # Fallback to prevent crashes
+
 class QueuedTriggerSystem:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
@@ -31,6 +92,7 @@ class QueuedTriggerSystem:
     async def initialize(self):
         """
         Initialize the queued trigger system.
+        FIXED: Uses robust site key extraction.
         """
         try:
             # Initialize processing queue
@@ -41,11 +103,17 @@ class QueuedTriggerSystem:
             sites = []
             
             async for site_doc in cursor:
-                site_key = site_doc.get("site_url", "").replace(".nl", "").replace(".", "_")
-                if site_key:
-                    sites.append(site_key)
-                    # Initialize WP queue for each site
-                    self.wp_queues[site_key] = WPQueue(self.db, site_key)
+                site_url = site_doc.get("site_url", "")
+                if site_url:
+                    # FIXED: Use robust site key extraction
+                    site_key = extract_site_key(site_url)
+                    if site_key:
+                        sites.append(site_key)
+                        # Initialize WP queue for each site
+                        self.wp_queues[site_key] = WPQueue(self.db, site_key)
+                        logger.debug(f"Mapped site_url '{site_url}' -> site_key '{site_key}'")
+                    else:
+                        logger.warning(f"Could not extract valid site key from '{site_url}'")
             
             self.active_sites = sites
             logger.info(f"Initialized queued trigger system for {len(sites)} sites: {sites}")
@@ -331,6 +399,7 @@ class QueuedTriggerSystem:
     async def _handle_site_settings_change(self, change: Dict[str, Any]):
         """
         Handle site_settings changes by queueing batch processing jobs.
+        FIXED: Uses robust site key extraction.
         """
         try:
             document = change.get("fullDocument")
@@ -339,10 +408,11 @@ class QueuedTriggerSystem:
                 return
             
             site_url = document.get("site_url", "")
-            site_key = site_url.replace(".nl", "").replace(".", "_")
+            # FIXED: Use robust site key extraction
+            site_key = extract_site_key(site_url)
             
-            if site_key not in self.active_sites:
-                logger.warning(f"Unknown site in settings change: {site_key}")
+            if not site_key or site_key not in self.active_sites:
+                logger.warning(f"Unknown or invalid site in settings change: '{site_url}' -> '{site_key}'")
                 return
             
             # Determine what changed
