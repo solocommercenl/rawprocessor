@@ -11,7 +11,7 @@ from site_settings import SiteSettings
 from jobqueue import WPQueue
 from utils import (
     calculate_hash_groups, normalize_gallery, extract_power_values, 
-    serialize_array_for_jetengine, extract_numeric_value
+    extract_numeric_value
 )
 from utils_filters import is_record_clean, check_raw_against_filters
 
@@ -125,8 +125,7 @@ class Processor:
     async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
         """
         Build the complete processed document matching the target structure.
-        Updated with all missing fields and proper JetEngine formatting.
-        FIXED: All BPM field references corrected.
+        FIXED: JetEngine CLI expects arrays, NOT PHP serialized format.
         """
         doc: Dict[str, Any] = {}
 
@@ -229,11 +228,11 @@ class Processor:
         doc["im_status"] = "True"  # JetEngine expects string
         doc["updated_at"] = datetime.utcnow()
         
-        # === ADD TRANSLATED FIELDS ===
+        # === ADD TRANSLATED FIELDS AS ARRAYS (NOT SERIALIZED) ===
         for key, value in translated.items():
-            # Convert arrays to PHP serialized format for JetEngine
             if isinstance(value, list):
-                doc[key] = serialize_array_for_jetengine(value)
+                # FIXED: Keep as arrays for JetEngine CLI import
+                doc[key] = value
             else:
                 doc[key] = value
         

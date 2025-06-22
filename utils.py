@@ -4,7 +4,7 @@ utils.py
 Shared helpers for rawprocessor (date parsing, Mongo lookups, hash logic, etc).
 All helpers are modular, async-ready, robust, and documented.
 
-FIXED: All BPM references corrected and lookup functions restored.
+FIXED: Removed serialize_array_for_jetengine function since JetEngine CLI expects arrays.
 """
 
 import hashlib
@@ -70,24 +70,6 @@ def extract_power_values(power_str: str) -> Tuple[Optional[int], Optional[int]]:
             break
     
     return kw, hp
-
-# --- PHP Serialization for JetEngine ---
-def serialize_array_for_jetengine(items: List[str]) -> str:
-    """
-    Convert Python list to PHP serialized array format for JetEngine.
-    Example: ['item1', 'item2'] -> 'a:2:{i:0;s:5:"item1";i:1;s:5:"item2";}'
-    """
-    if not items:
-        return 'a:0:{}'
-    
-    parts = [f'a:{len(items)}:{{']
-    
-    for i, item in enumerate(items):
-        item_str = str(item)
-        parts.append(f'i:{i};s:{len(item_str)}:"{item_str}";')
-    
-    parts.append('}')
-    return ''.join(parts)
 
 # --- Extract Numeric Values ---
 def extract_numeric_value(value_str: str) -> Optional[float]:
@@ -168,7 +150,6 @@ async def get_depreciation_percentage(db: AsyncIOMotorDatabase, age_in_months: i
 async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
     """
     Get BPM entry from MongoDB lookup tables based on registration year and emissions.
-    FIXED: Corrected table name to bpm_tables.
     """
     try:
         query = {"year": reg_year}
@@ -177,7 +158,7 @@ async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
         if reg_year == 2020:
             query["half"] = "H1" if reg_month < 7 else "H2"
         
-        doc = await db.bpm_tables.find_one(query)
+        doc = await db.bmp_tables.find_one(query)
         if not doc:
             logger.warning("No BPM table found for year %s", reg_year)
             return None
@@ -207,7 +188,6 @@ async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
 async def get_phev_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int) -> Optional[dict]:
     """
     Get PHEV entry from MongoDB lookup tables for hybrid vehicles.
-    FIXED: Corrected table name to phev_tables.
     """
     try:
         query = {"year": reg_year}
