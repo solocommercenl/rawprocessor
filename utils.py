@@ -176,7 +176,7 @@ async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: 
         if reg_year == 2020:
             query["half"] = "H1" if reg_month < 7 else "H2"
         
-        doc = await db.bmp_tables.find_one(query)
+        doc = await db.bpm_tables.find_one(query)
         if not doc:
             logger.warning("No BPM table found for year %s", reg_year)
             return None
