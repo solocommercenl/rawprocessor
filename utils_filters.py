@@ -5,7 +5,7 @@ Enhanced filtering utilities for rawprocessor.
 Contains both basic data quality checks and comprehensive site-specific filtering logic.
 Used during processing for immediate validation without database operations.
 
-UPDATED: Now uses centralized configuration system for data quality thresholds.
+UPDATED: Enhanced data quality with emissions validation and 500g cap.
 """
 
 from loguru import logger
@@ -15,30 +15,67 @@ from config import config
 
 def is_record_clean(record: dict) -> bool:
     """
-    Fast validation - check if record meets basic quality standards.
+    Enhanced data quality validation - check if record meets all quality standards.
     Used during processing to skip bad records immediately.
     
-    Uses configuration values for quality thresholds:
-    1. Record has >= configured minimum images 
-    2. If emissions = configured threshold, fuel type must be Electric
+    Logic Flow: Record → Check Images (≥4) → Check Emissions Validity → Check Emissions Cap → Pass/Reject
+    
+    Quality Rules:
+    1. Images: >= configured minimum images required
+    2. Emissions Validity: Missing emissions only allowed for pure electric cars
+    3. Emissions Cap: No car can have > 500g emissions (data quality check)
+    4. Zero Emissions: If emissions = 0, fuel type must be Electric
     
     :param record: Raw record dictionary
-    :return: True if record passes basic quality checks, False otherwise
+    :return: True if record passes all quality checks, False otherwise
     """
-    # Check 1: Images count (configurable requirement)
+    # === STEP 1: Check Images (≥4) ===
     images = record.get("Images", [])
     if not images or len(images) < config.MIN_IMAGES_REQUIRED:
+        logger.debug(f"REJECTED: Insufficient images ({len(images) if images else 0} < {config.MIN_IMAGES_REQUIRED})")
         return False
     
-    # Check 2: Emissions validation (configurable threshold)
+    # === STEP 2: Check Emissions Validity ===
     energy_data = record.get("energyconsumption", {})
     fuel_type = energy_data.get("Fueltype", "").strip()
     raw_emissions = energy_data.get("raw_emissions")
     
-    # If emissions is at threshold and not electric, it's invalid
-    if raw_emissions == config.EMISSIONS_ZERO_THRESHOLD and "Electric" not in fuel_type:
+    # Check for missing/null emissions
+    if raw_emissions is None:
+        # Only pure electric cars can have missing emissions
+        fuel_type_clean = fuel_type.lower()
+        is_pure_electric = (
+            fuel_type_clean == "electric" or 
+            fuel_type_clean == "elektrisch"
+        ) and "gasoline" not in fuel_type_clean and "diesel" not in fuel_type_clean
+        
+        if not is_pure_electric:
+            logger.debug(f"REJECTED: Missing emissions for non-pure-electric car (fuel: {fuel_type})")
+            return False
+        else:
+            logger.debug(f"ACCEPTED: Pure electric car with missing emissions (fuel: {fuel_type})")
+            return True  # Pure electric with null emissions is OK
+    
+    # Convert emissions to number for further checks
+    try:
+        emissions_value = float(raw_emissions)
+    except (ValueError, TypeError):
+        logger.debug(f"REJECTED: Invalid emissions value ({raw_emissions})")
         return False
     
+    # === STEP 3: Check Emissions Cap (≤500g) ===
+    if emissions_value > 500:
+        logger.debug(f"REJECTED: Emissions too high ({emissions_value}g > 500g)")
+        return False
+    
+    # === STEP 4: Check Zero Emissions Logic ===
+    if emissions_value == config.EMISSIONS_ZERO_THRESHOLD:
+        # If emissions = 0, fuel type must be Electric
+        if "Electric" not in fuel_type and "elektrisch" not in fuel_type.lower():
+            logger.debug(f"REJECTED: Zero emissions for non-electric car (fuel: {fuel_type})")
+            return False
+    
+    logger.debug(f"ACCEPTED: Record passed all quality checks (images: {len(images)}, emissions: {emissions_value}g, fuel: {fuel_type})")
     return True
 
 
@@ -238,7 +275,8 @@ def get_data_quality_config_summary() -> Dict[str, Any]:
     return {
         "min_images_required": config.MIN_IMAGES_REQUIRED,
         "emissions_threshold": config.EMISSIONS_ZERO_THRESHOLD,
-        "source": "configuration system"
+        "emissions_cap": 500,
+        "source": "enhanced configuration system"
     }
 
 
@@ -267,3 +305,62 @@ def validate_data_quality_config() -> Dict[str, Any]:
         "warnings": warnings,
         "configuration": get_data_quality_config_summary()
     }
+
+
+def get_data_quality_stats(records: list) -> Dict[str, Any]:
+    """
+    Analyze a list of records and return data quality statistics.
+    
+    :param records: List of raw records to analyze
+    :return: Statistics about data quality issues
+    """
+    stats = {
+        "total_records": len(records),
+        "passed": 0,
+        "failed": 0,
+        "failure_reasons": {
+            "insufficient_images": 0,
+            "missing_emissions": 0,
+            "emissions_too_high": 0,
+            "invalid_zero_emissions": 0,
+            "invalid_emissions_value": 0
+        }
+    }
+    
+    for record in records:
+        if is_record_clean(record):
+            stats["passed"] += 1
+        else:
+            stats["failed"] += 1
+            
+            # Determine failure reason
+            images = record.get("Images", [])
+            if not images or len(images) < config.MIN_IMAGES_REQUIRED:
+                stats["failure_reasons"]["insufficient_images"] += 1
+                continue
+                
+            energy_data = record.get("energyconsumption", {})
+            fuel_type = energy_data.get("Fueltype", "").strip()
+            raw_emissions = energy_data.get("raw_emissions")
+            
+            if raw_emissions is None:
+                fuel_type_clean = fuel_type.lower()
+                is_pure_electric = (
+                    fuel_type_clean == "electric" or 
+                    fuel_type_clean == "elektrisch"
+                ) and "gasoline" not in fuel_type_clean and "diesel" not in fuel_type_clean
+                
+                if not is_pure_electric:
+                    stats["failure_reasons"]["missing_emissions"] += 1
+                    continue
+            
+            try:
+                emissions_value = float(raw_emissions)
+                if emissions_value > 500:
+                    stats["failure_reasons"]["emissions_too_high"] += 1
+                elif emissions_value == config.EMISSIONS_ZERO_THRESHOLD and "Electric" not in fuel_type:
+                    stats["failure_reasons"]["invalid_zero_emissions"] += 1
+            except (ValueError, TypeError):
+                stats["failure_reasons"]["invalid_emissions_value"] += 1
+    
+    return stats
