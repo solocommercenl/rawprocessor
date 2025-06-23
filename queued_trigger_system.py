@@ -5,6 +5,7 @@ Updated trigger system that uses the processing queue for handling raw changes a
 This provides better performance and reliability for high-volume operations.
 
 FIXED: Robust site detection logic that works with any domain format.
+FIXED: Infinite loop prevention for WordPress post_id tracking updates.
 
 Architecture:
 Raw Changes → Queue Processing Jobs → Workers Update Processed → Processed Changes → Queue WP Jobs
@@ -328,9 +329,22 @@ class QueuedTriggerSystem:
     async def _handle_processed_change(self, change: Dict[str, Any], site: str):
         """
         Handle processed collection changes - queue WordPress jobs.
+        FIXED: Prevents infinite loops from wp_post_id tracking updates.
         """
         try:
+            # 🚨 FIX: Check if this is just a WordPress tracking update
             operation_type = change.get("operationType")
+            if operation_type in ("update", "replace"):
+                update_desc = change.get("updateDescription", {})
+                updated_fields = set(update_desc.get("updatedFields", {}).keys())
+                
+                # If only WordPress tracking fields were updated, skip job creation
+                wp_tracking_fields = {"wp_post_id", "wp_updated_at"}
+                if updated_fields and updated_fields.issubset(wp_tracking_fields):
+                    logger.debug(f"[{site}] Skipping WP tracking update - no job created")
+                    return  # Exit early - NO JOB CREATED
+            
+            # Continue with existing logic
             document = change.get("fullDocument")
             document_key = change.get("documentKey", {})
             
@@ -476,7 +490,7 @@ class QueuedTriggerSystem:
                 logger.info(f"Queued {len(job_ids)} jobs for pricing changed on site {site}")
                 
             elif trigger_type == "weekly_scheduled_job":
-                # Queue pricing recalculation jobs for all sites (BPM depreciation updates)
+                # Queue pricing recalculation jobs for all sites (depreciation updates)
                 sites_to_process = [site] if site else self.active_sites
                 
                 for site_key in sites_to_process:
