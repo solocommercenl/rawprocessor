@@ -185,7 +185,7 @@ async def get_depreciation_percentage(db: AsyncIOMotorDatabase, age_in_months: i
         return 0.0
 
 # --- Mongo BPM Lookup ---
-async def get_bmp_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
+async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
     """
     Get BPM entry from MongoDB lookup tables based on registration year and emissions.
     """
