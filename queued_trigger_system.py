@@ -6,6 +6,7 @@ This provides better performance and reliability for high-volume operations.
 
 FIXED: Robust site detection logic that works with any domain format.
 FIXED: Infinite loop prevention for WordPress post_id tracking updates.
+FIXED: Corrected price_margins categorization and added cache clearing for both filter and pricing changes.
 
 Architecture:
 Raw Changes → Queue Processing Jobs → Workers Update Processed → Processed Changes → Queue WP Jobs
@@ -413,7 +414,7 @@ class QueuedTriggerSystem:
     async def _handle_site_settings_change(self, change: Dict[str, Any]):
         """
         Handle site_settings changes by queueing batch processing jobs.
-        FIXED: Uses robust site key extraction.
+        FIXED: Uses robust site key extraction, correct field categorization, and cache clearing.
         """
         try:
             document = change.get("fullDocument")
@@ -434,18 +435,25 @@ class QueuedTriggerSystem:
             
             change_types = []
             
-            # Check for filter changes
-            filter_fields = ["filter_criteria", "price_margins"]
+            # FIXED: Check for filter changes (only actual filter criteria)
+            filter_fields = ["filter_criteria"]
             if any(field in updated_fields for field in filter_fields):
+                # FIXED: Clear cache before queueing filter jobs
+                SiteSettings.clear_cache(site_key)
                 change_types.append("filters_changed")
+                logger.info(f"Filter criteria changed for {site_key} - cache cleared")
             
-            # Check for pricing changes
+            # FIXED: Check for pricing changes (including price_margins which was moved here)
             pricing_fields = [
                 "licence_plate_fee", "rdw_inspection", "transport_cost", 
-                "unforeseen_percentage", "annual_interest_rate", "loan_term_months"
+                "unforeseen_percentage", "annual_interest_rate", "loan_term_months",
+                "price_margins"  # FIXED: Moved from filter_fields to pricing_fields
             ]
             if any(field in updated_fields for field in pricing_fields):
+                # FIXED: Clear cache before queueing pricing jobs
+                SiteSettings.clear_cache(site_key)
                 change_types.append("pricing_changed")
+                logger.info(f"Pricing configuration changed for {site_key} - cache cleared")
             
             # Queue processing jobs for each change type
             for change_type in change_types:

@@ -8,6 +8,8 @@ Responsibilities:
 - Validate structure and required fields.
 - Expose as an async class with optional in-memory cache.
 - Raise/log clear errors on missing or invalid configs.
+
+FIXED: Added cache clearing functionality and loan_term_months to required fields.
 """
 
 from typing import Any, Dict, Optional
@@ -22,6 +24,7 @@ REQUIRED_FIELDS = [
     "transport_cost",
     "unforeseen_percentage",
     "annual_interest_rate",
+    "loan_term_months",  # FIXED: Added to required fields
     "filter_criteria",
     "translation_profile"
 ]
@@ -78,3 +81,35 @@ class SiteSettings:
         if use_cache:
             self._cache[cache_key] = doc
         return doc
+
+    @classmethod
+    def clear_cache(cls, site_key: str = None):
+        """
+        Clear cache for specific site or all sites.
+        
+        :param site_key: Site key to clear cache for. If None, clears all cache.
+        """
+        if site_key:
+            cache_key = site_key.lower()
+            if cache_key in cls._cache:
+                del cls._cache[cache_key]
+                logger.info(f"Cleared site settings cache for {site_key}")
+            else:
+                logger.debug(f"No cache entry found for {site_key}")
+        else:
+            cache_count = len(cls._cache)
+            cls._cache.clear()
+            logger.info(f"Cleared all site settings cache ({cache_count} entries)")
+
+    @classmethod
+    def get_cache_info(cls) -> Dict[str, Any]:
+        """
+        Get information about current cache state for debugging.
+        
+        :return: Dictionary with cache statistics
+        """
+        return {
+            "cache_size": len(cls._cache),
+            "cached_sites": list(cls._cache.keys()),
+            "memory_usage_estimate": sum(len(str(v)) for v in cls._cache.values())
+        }

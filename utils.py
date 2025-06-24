@@ -6,6 +6,7 @@ All helpers are modular, async-ready, robust, and documented.
 
 FIXED: Removed serialize_array_for_jetengine function since JetEngine CLI expects arrays.
 FIXED: Better extract_numeric_value function for European number formats.
+FIXED: Expanded hash groups to include all financial fields for proper WordPress update detection.
 """
 
 import hashlib
@@ -22,9 +23,18 @@ def calculate_hash_groups(doc: Dict[str, Any]) -> Dict[str, str]:
     """
     Compute SHA-256 hashes for each group of fields used in partial update checks.
     Groups: pricing, leasing, gallery.
+    
+    FIXED: Expanded pricing group to include ALL financial fields so WordPress updates 
+    are triggered when any financial calculation changes.
     """
     groups = {
-        "pricing": ["im_price", "im_nett_price", "im_bpm_rate", "im_vat_amount"],
+        "pricing": [
+            # Core pricing fields (original)
+            "im_price", "im_nett_price", "im_bpm_rate", "im_vat_amount",
+            # FIXED: Added missing financial fields
+            "im_extra_cost_total", "im_unforeseen_cost", "im_margin_amount",
+            "im_nett_sales_price", "im_nett_margin"
+        ],
         "leasing": ["im_monthly_payment", "im_down_payment", "im_desired_remaining_debt"],
         "gallery": ["im_gallery"]
     }
@@ -175,7 +185,7 @@ async def get_depreciation_percentage(db: AsyncIOMotorDatabase, age_in_months: i
         return 0.0
 
 # --- Mongo BPM Lookup ---
-async def get_bpm_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
+async def get_bmp_entry(db: AsyncIOMotorDatabase, reg_year: int, raw_emissions: float, reg_month: int, fuel_type: str) -> Optional[dict]:
     """
     Get BPM entry from MongoDB lookup tables based on registration year and emissions.
     """

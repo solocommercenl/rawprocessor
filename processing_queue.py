@@ -5,6 +5,7 @@ Queued processing system for rawprocessor Stage 1.
 Handles high-volume raw changes and site settings changes through a robust queue system.
 
 UPDATED: Now uses centralized configuration system instead of hard-coded values.
+FIXED: Proper filter change logic that handles add/remove operations correctly.
 
 Architecture:
 Raw/Settings Change → Queue Processing Job → Worker Processes → Update Processed → Trigger WP Jobs
@@ -16,12 +17,13 @@ Features:
 - Burst absorption and rate limiting
 - Dead letter queue for failed jobs
 - Comprehensive monitoring and metrics
+- PROPER filter change handling (adds/removes records correctly)
 """
 
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from enum import Enum
 from dataclasses import dataclass, asdict
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -32,6 +34,7 @@ from config import config
 from site_settings import SiteSettings
 from processor import Processor
 from cleaner import Cleaner
+from utils_filters import check_raw_against_filters
 
 class JobType(Enum):
     RAW_INSERT = "raw_insert"
@@ -428,8 +431,11 @@ class ProcessingQueue:
             if job.job_type in [JobType.RAW_INSERT, JobType.RAW_UPDATE, JobType.RAW_PRICE_CHANGE, JobType.RAW_STATUS_CHANGE]:
                 return await self._process_raw_job(job, processor, site_settings, worker_id)
             
-            elif job.job_type in [JobType.SITE_FILTERS_CHANGED, JobType.SITE_PRICING_CHANGED]:
-                return await self._process_site_settings_job(job, processor, site_settings, worker_id)
+            elif job.job_type == JobType.SITE_FILTERS_CHANGED:
+                return await self._process_filter_changes(job, processor, site_settings, worker_id)
+            
+            elif job.job_type == JobType.SITE_PRICING_CHANGED:
+                return await self._process_pricing_changes(job, processor, site_settings, worker_id)
             
             elif job.job_type == JobType.SITE_REBUILD:
                 return await self._process_site_rebuild_job(job, processor, worker_id)
@@ -484,9 +490,141 @@ class ProcessingQueue:
             logger.error(f"Error in raw job processing: {ex}")
             return False
 
-    async def _process_site_settings_job(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
+    async def _process_filter_changes(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
         """
-        Process site settings change jobs (filters or pricing).
+        FIXED: Process site filter changes with proper add/remove logic.
+        
+        When filters change, we need to:
+        1. Get current processed records for this site
+        2. Re-evaluate ALL raw records against new filters  
+        3. Remove processed records that no longer pass filters
+        4. Add processed records for newly passing raw records
+        5. This triggers WordPress deletions/creations via change streams
+        """
+        try:
+            payload = job.payload
+            batch_number = payload.get("batch_number")
+            
+            logger.info(f"Worker {worker_id} processing filter changes for site {job.site}")
+            
+            # Get new filter criteria
+            new_filters = site_settings.get("filter_criteria", {})
+            processed_collection = self.db[f"processed_{job.site}"]
+            
+            if batch_number is not None:
+                # Batch processing for large operations
+                skip = payload.get("skip", 0)
+                limit = payload.get("limit", self.batch_size)
+                
+                # Get current batch of processed records
+                current_processed = {}
+                async for doc in processed_collection.find({}).skip(skip).limit(limit):
+                    car_id = doc.get("im_ad_id")
+                    if car_id:
+                        current_processed[car_id] = doc
+                
+                # Process corresponding raw records in this batch
+                raw_cursor = self.db.raw.find({"listing_status": True}).skip(skip).limit(limit)
+                should_be_processed = {}  # car_id -> processed_doc
+                
+                async for raw_doc in raw_cursor:
+                    car_id = raw_doc.get("car_id")
+                    if not car_id:
+                        continue
+                    
+                    # Check if this raw record should be processed with new filters
+                    if check_raw_against_filters(raw_doc, new_filters):
+                        # Process the record
+                        processed = await processor.process_single_record(raw_doc, site_settings)
+                        if processed:
+                            should_be_processed[car_id] = processed
+                
+                # Find records to remove (in current_processed but not in should_be_processed)
+                to_remove = set(current_processed.keys()) - set(should_be_processed.keys())
+                
+                # Find records to add/update (in should_be_processed)
+                to_upsert = should_be_processed
+                
+                # Remove records that no longer pass filters
+                removed_count = 0
+                for car_id in to_remove:
+                    result = await processed_collection.delete_one({"im_ad_id": car_id})
+                    if result.deleted_count > 0:
+                        removed_count += 1
+                        logger.debug(f"Worker {worker_id} removed car_id={car_id} (no longer passes filters)")
+                
+                # Add/update records that pass new filters
+                upserted_count = 0
+                for car_id, processed_doc in to_upsert.items():
+                    await processed_collection.update_one(
+                        {"im_ad_id": car_id},
+                        {"$set": processed_doc},
+                        upsert=True
+                    )
+                    upserted_count += 1
+                    logger.debug(f"Worker {worker_id} upserted car_id={car_id} (passes new filters)")
+                
+                logger.info(f"Worker {worker_id} completed filter batch {batch_number + 1}/{payload.get('total_batches')} for site {job.site}: removed {removed_count}, upserted {upserted_count}")
+                
+            else:
+                # Non-batch processing (full site) - using cursors for memory efficiency
+                logger.info(f"Worker {worker_id} starting full filter processing for site {job.site}")
+                
+                # Step 1: Get all current processed record IDs
+                current_processed_ids = set()
+                async for doc in processed_collection.find({}, {"im_ad_id": 1}):
+                    car_id = doc.get("im_ad_id")
+                    if car_id:
+                        current_processed_ids.add(car_id)
+                
+                logger.info(f"Worker {worker_id} found {len(current_processed_ids)} existing processed records")
+                
+                # Step 2: Process all raw records with new filters
+                should_be_processed_ids = set()
+                upserted_count = 0
+                
+                async for raw_doc in self.db.raw.find({"listing_status": True}):
+                    car_id = raw_doc.get("car_id")
+                    if not car_id:
+                        continue
+                    
+                    # Check if this raw record should be processed with new filters
+                    if check_raw_against_filters(raw_doc, new_filters):
+                        should_be_processed_ids.add(car_id)
+                        
+                        # Process and store the record
+                        processed = await processor.process_single_record(raw_doc, site_settings)
+                        if processed:
+                            await processed_collection.update_one(
+                                {"im_ad_id": car_id},
+                                {"$set": processed},
+                                upsert=True
+                            )
+                            upserted_count += 1
+                
+                logger.info(f"Worker {worker_id} processed {upserted_count} records that pass new filters")
+                
+                # Step 3: Remove records that no longer pass filters
+                to_remove_ids = current_processed_ids - should_be_processed_ids
+                removed_count = 0
+                
+                for car_id in to_remove_ids:
+                    result = await processed_collection.delete_one({"im_ad_id": car_id})
+                    if result.deleted_count > 0:
+                        removed_count += 1
+                
+                logger.info(f"Worker {worker_id} completed full filter processing for site {job.site}: removed {removed_count}, upserted {upserted_count}")
+            
+            return True
+            
+        except Exception as ex:
+            logger.error(f"Error in filter changes processing: {ex}")
+            return False
+
+    async def _process_pricing_changes(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
+        """
+        Process site pricing changes - reprocess existing records with new pricing.
+        This is the original logic that was used for both filters and pricing.
         """
         try:
             payload = job.payload
@@ -513,10 +651,10 @@ class ProcessingQueue:
                             processed_count += 1
                     
                     except Exception as ex:
-                        logger.error(f"Error processing record in batch: {ex}")
+                        logger.error(f"Error processing record in pricing batch: {ex}")
                         continue
                 
-                logger.info(f"Worker {worker_id} completed batch {batch_number + 1}/{payload.get('total_batches')} for site {job.site}: {processed_count} records")
+                logger.info(f"Worker {worker_id} completed pricing batch {batch_number + 1}/{payload.get('total_batches')} for site {job.site}: {processed_count} records")
                 
             else:
                 # Full site processing (fallback for non-batch jobs)
@@ -536,15 +674,15 @@ class ProcessingQueue:
                             processed_count += 1
                     
                     except Exception as ex:
-                        logger.error(f"Error processing record: {ex}")
+                        logger.error(f"Error processing record in pricing: {ex}")
                         continue
                 
-                logger.info(f"Worker {worker_id} completed full site processing for {job.site}: {processed_count} records")
+                logger.info(f"Worker {worker_id} completed full pricing processing for {job.site}: {processed_count} records")
             
             return True
             
         except Exception as ex:
-            logger.error(f"Error in site settings job processing: {ex}")
+            logger.error(f"Error in pricing changes processing: {ex}")
             return False
 
     async def _process_site_rebuild_job(self, job: ProcessingJob, processor: Processor, worker_id: int) -> bool:
