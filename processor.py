@@ -152,7 +152,10 @@ class Processor:
         # Handle both 'milage' (typo in source) and 'mileage'
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
-        doc["im_fullservicehistory"] = str(bool(raw.get("vehiclehistory", {}).get("Fullservicehistory", False))).lower()
+        
+        # === SERVICE HISTORY - FIXED: Convert to Dutch Ja/Nee ===
+        fullservicehistory = bool(raw.get("vehiclehistory", {}).get("Fullservicehistory", False))
+        doc["im_fullservicehistory"] = "Ja" if fullservicehistory else "Nee"
         
         # === POWER EXTRACTION ===
         kw_power, hp_power = extract_power_values(raw.get("power", ""))
@@ -216,8 +219,10 @@ class Processor:
         
         # === EMISSIONS AND VAT ===
         doc["im_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
-        # im_vat_deductible should be string "true"/"false" for JetEngine
-        doc["im_vat_deductible"] = str(bool(raw.get("vatded", False))).lower()
+        
+        # === VAT DEDUCTIBLE - FIXED: Convert to array for JetEngine checkbox field ===
+        vatded = bool(raw.get("vatded", False))
+        doc["im_vat_deductible"] = ["true"] if vatded else ["false"]
         
         # === TAXONOMIES (for WordPress) ===
         doc["make"] = make
