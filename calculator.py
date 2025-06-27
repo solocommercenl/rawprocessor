@@ -1,12 +1,4 @@
-"""
-calculator.py
-
-All financial logic for rawprocessor Stage 1.
-Implements VAT-deductible (vated=True) and margin (vated=False) business rules for vehicle imports,
-using exact legacy BPM logic and Mongo-driven tables.
-
-FIXED: BPM calculation restored to working state based on legacy calculator.
-"""
+#calculator.py
 
 import logging
 from typing import Dict, Any, Optional
@@ -45,11 +37,7 @@ class Calculator:
         record: dict,
         vated: bool
     ) -> Dict[str, Any]:
-        """
-        Calculate all financial fields for a vehicle record.
-        Uses corrected field mapping to match actual raw data structure.
-        Uses configuration values for financial constants.
-        """
+        
         try:
             # --- Extract price (primary field) ---
             im_price_org = float(record.get("price", 0))
@@ -129,8 +117,8 @@ class Calculator:
                 im_nett_margin = round(im_total_taxable_price - im_extra_cost_total - im_nett_price, 2)
             else:
                 # Margin scheme: add margin to pricing
-                im_price = round(im_price_org + im_margin_amount + im_extra_cost_total + im_unforeseen_cost + im_vat_amount + im_bmp_rate, 2)
-                im_nett_sales_price = round(im_price_org + im_margin_amount + im_extra_cost_total + im_unforeseen_cost + im_bmp_rate, 2)
+                im_price = round(im_price_org + im_margin_amount + im_extra_cost_total + im_unforeseen_cost + im_vat_amount + im_bpm_rate, 2)
+                im_nett_sales_price = round(im_price_org + im_margin_amount + im_extra_cost_total + im_unforeseen_cost + im_bpm_rate, 2)
                 im_nett_margin = round(im_margin_amount + im_unforeseen_cost, 2)
 
             # --- Step 5: Leasing calculations (using configured percentages) ---
@@ -172,9 +160,7 @@ class Calculator:
             raise
 
     def _get_margin_pct(self, price_org: float) -> float:
-        """
-        Get margin percentage based on price bands from site settings.
-        """
+   
         try:
             price_margins = self.site_settings.get("price_margins", [])
             for band in price_margins:
@@ -222,10 +208,7 @@ class Calculator:
         registration_date: Optional[str],
         registration_year: Optional[int]
     ) -> Dict[str, Any]:
-        """
-        Calculate BPM (Dutch vehicle tax) using MongoDB lookup tables.
-        FIXED: Restored to working state based on legacy calculator.
-        """
+      
         try:
             # Electric vehicles are exempt
             fuel_type_clean = (fuel_type or "").strip().lower()
