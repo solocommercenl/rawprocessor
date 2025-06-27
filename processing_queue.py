@@ -113,6 +113,7 @@ class ProcessingQueue:
         self.db = db
         self.collection = db.processing_queue
         self.processors: Dict[str, Processor] = {}
+        self.wp_queues: Dict[str, Any] = {}
         self.workers_running = False
         self.worker_tasks: List[asyncio.Task] = []
         
@@ -180,6 +181,9 @@ class ProcessingQueue:
                     
                     if site_key and re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', site_key):
                         self.processors[site_key] = Processor(self.db, site_key)
+
+                        from jobqueue import WPQueue  # ← ADD this import
+                        self.wp_queues[site_key] = WPQueue(self.db, site_key)  # ← ADD this line
             
             logger.info(f"Initialized processors for {len(self.processors)} sites")
             
@@ -504,7 +508,7 @@ class ProcessingQueue:
             logger.info(f"Worker {worker_id} processing filter changes for site {job.site}")
             
             # Get new filter criteria
-            new_filters = site_settings.get("filter_criteria", {})
+            new_filters = fresh_site_settings.get("filter_criteria", {})
             processed_collection = self.db[f"processed_{job.site}"]
             
             if batch_number is not None:
