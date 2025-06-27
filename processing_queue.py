@@ -493,22 +493,20 @@ class ProcessingQueue:
     async def _process_filter_changes(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
         """
         FIXED: Process site filter changes with proper add/remove logic.
-        
-        When filters change, we need to:
-        1. Get current processed records for this site
-        2. Re-evaluate ALL raw records against new filters  
-        3. Remove processed records that no longer pass filters
-        4. Add processed records for newly passing raw records
-        5. This triggers WordPress deletions/creations via change streams
         """
         try:
+            # FORCE clear site settings cache and reload fresh settings
+            from site_settings import SiteSettings
+            SiteSettings.clear_cache(job.site)
+            fresh_site_settings = await SiteSettings(self.db).get(job.site)
+            
             payload = job.payload
             batch_number = payload.get("batch_number")
             
             logger.info(f"Worker {worker_id} processing filter changes for site {job.site}")
             
             # Get new filter criteria
-            new_filters = site_settings.get("filter_criteria", {})
+            new_filters = fresh_site_settings.get("filter_criteria", {})
             processed_collection = self.db[f"processed_{job.site}"]
             
             if batch_number is not None:
@@ -535,7 +533,7 @@ class ProcessingQueue:
                     # Check if this raw record should be processed with new filters
                     if check_raw_against_filters(raw_doc, new_filters):
                         # Process the record
-                        processed = await processor.process_single_record(raw_doc, site_settings)
+                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
                         if processed:
                             should_be_processed[car_id] = processed
                 
@@ -593,7 +591,7 @@ class ProcessingQueue:
                         should_be_processed_ids.add(car_id)
                         
                         # Process and store the record
-                        processed = await processor.process_single_record(raw_doc, site_settings)
+                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
                         if processed:
                             await processed_collection.update_one(
                                 {"im_ad_id": car_id},
@@ -622,12 +620,15 @@ class ProcessingQueue:
             return False
 
     async def _process_pricing_changes(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
-        """
-        Process site pricing changes - reprocess existing records with new pricing.
-        This is the original logic that was used for both filters and pricing.
-        """
+        
         try:
+            # FORCE clear site settings cache and reload fresh settings
+            from site_settings import SiteSettings
+            SiteSettings.clear_cache(job.site)
+            fresh_site_settings = await SiteSettings(self.db).get(job.site)
+            
             payload = job.payload
+            
             batch_number = payload.get("batch_number")
             
             if batch_number is not None:
@@ -640,7 +641,7 @@ class ProcessingQueue:
                 
                 async for raw_doc in cursor:
                     try:
-                        processed = await processor.process_single_record(raw_doc, site_settings)
+                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
                         
                         if processed:
                             await self.db[f"processed_{job.site}"].update_one(
@@ -663,7 +664,7 @@ class ProcessingQueue:
                 
                 async for raw_doc in cursor:
                     try:
-                        processed = await processor.process_single_record(raw_doc, site_settings)
+                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
                         
                         if processed:
                             await self.db[f"processed_{job.site}"].update_one(

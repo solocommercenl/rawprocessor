@@ -89,11 +89,8 @@ class Processor:
             return None
 
     async def process(self, raw: dict, site_settings: dict) -> Optional[dict]:
-        """
-        Transform a cleaned raw record into a processed record ready for WordPress.
-        """
-        if self.calculator is None:
-            self.calculator = Calculator(self.db, site_settings)
+       
+        self.calculator = Calculator(self.db, site_settings)
 
         record_id = raw.get("_id") or raw.get("car_id") or "unknown"
 
