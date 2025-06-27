@@ -128,9 +128,10 @@ class Calculator:
                 im_nett_sales_price = round(im_total_taxable_price + im_bpm_rate, 2)
                 im_nett_margin = round(im_total_taxable_price - im_extra_cost_total - im_nett_price, 2)
             else:
-                im_price = round(im_price_org + im_extra_cost_total + im_unforeseen_cost + im_vat_amount + im_bpm_rate, 2)
-                im_nett_sales_price = round(im_price_org + im_extra_cost_total + im_unforeseen_cost + im_bpm_rate, 2)
-                im_nett_margin = round(im_nett_sales_price - im_extra_cost_total - im_bpm_rate - im_price_org, 2)
+                # Margin scheme: add margin to pricing
+                im_price = round(im_price_org + im_margin_amount + im_extra_cost_total + im_unforeseen_cost + im_vat_amount + im_bmp_rate, 2)
+                im_nett_sales_price = round(im_price_org + im_margin_amount + im_extra_cost_total + im_unforeseen_cost + im_bmp_rate, 2)
+                im_nett_margin = round(im_margin_amount + im_unforeseen_cost, 2)
 
             # --- Step 5: Leasing calculations (using configured percentages) ---
             im_down_payment = round(self.default_down_payment_pct * im_price, 2)
