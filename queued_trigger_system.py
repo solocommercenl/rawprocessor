@@ -435,14 +435,16 @@ class QueuedTriggerSystem:
             
             change_types = []
             
-            # FIXED: Check for filter changes (only actual filter criteria)
-            filter_fields = ["filter_criteria"]
-            if any(field in updated_fields for field in filter_fields):
-                # FIXED: Clear cache before queueing filter jobs
+            # Check for filter changes (detect ANY change within filter_criteria)
+            filter_changed = any(
+                field == "filter_criteria" or field.startswith("filter_criteria.")
+                for field in updated_fields
+            )
+            if filter_changed:
                 SiteSettings.clear_cache(site_key)
                 change_types.append("filters_changed")
                 logger.info(f"Filter criteria changed for {site_key} - cache cleared")
-            
+                
             # FIXED: Check for pricing changes (including price_margins which was moved here)
             pricing_fields = [
                 "licence_plate_fee", "rdw_inspection", "transport_cost", 
