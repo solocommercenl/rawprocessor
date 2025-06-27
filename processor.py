@@ -224,6 +224,9 @@ class Processor:
         vatded = bool(raw.get("vatded", False))
         doc["im_vat_deductible"] = "BTW auto" if vatded else "Marge auto"
         
+        # === VAT FILTER - For filtering/taxonomy purposes ===
+        doc["im_vat_filter"] = "btw" if vatded else "marge"
+        
         # === TAXONOMIES (for WordPress) ===
         doc["make"] = make
         doc["model"] = model  
