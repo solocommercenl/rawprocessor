@@ -220,9 +220,9 @@ class Processor:
         # === EMISSIONS AND VAT ===
         doc["im_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
         
-        # === VAT DEDUCTIBLE - FIXED: Convert to array for JetEngine checkbox field ===
+        # === VAT DEDUCTIBLE - FIXED: Convert to Dutch text values ===
         vatded = bool(raw.get("vatded", False))
-        doc["im_vat_deductible"] = ["true"] if vatded else ["false"]
+        doc["im_vat_deductible"] = "BTW auto" if vatded else "Marge auto"
         
         # === TAXONOMIES (for WordPress) ===
         doc["make"] = make
