@@ -491,9 +491,7 @@ class ProcessingQueue:
             return False
 
     async def _process_filter_changes(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
-        """
-        FIXED: Process site filter changes with proper add/remove logic.
-        """
+    
         try:
             # FORCE clear site settings cache and reload fresh settings
             from site_settings import SiteSettings
@@ -506,7 +504,7 @@ class ProcessingQueue:
             logger.info(f"Worker {worker_id} processing filter changes for site {job.site}")
             
             # Get new filter criteria
-            new_filters = fresh_site_settings.get("filter_criteria", {})
+            new_filters = site_settings.get("filter_criteria", {})
             processed_collection = self.db[f"processed_{job.site}"]
             
             if batch_number is not None:
@@ -543,9 +541,28 @@ class ProcessingQueue:
                 # Find records to add/update (in should_be_processed)
                 to_upsert = should_be_processed
                 
-                # Remove records that no longer pass filters
                 removed_count = 0
                 for car_id in to_remove:
+                    # First get the record to extract WP info for delete job
+                    record_to_delete = await processed_collection.find_one({"im_ad_id": car_id})
+                    
+                    if record_to_delete:
+                        # Create WP delete job BEFORE deleting from processed
+                        wp_post_id = record_to_delete.get("wp_post_id")
+                        queue = self.wp_queues.get(job.site)
+                        
+                        if queue:
+                            await queue.enqueue_job(
+                                action="delete",
+                                ad_id=car_id,
+                                post_id=wp_post_id,
+                                changed_fields=["status"],
+                                hash_groups={},
+                                reason="filter_exclusion"
+                            )
+                            logger.debug(f"Worker {worker_id} queued WP delete for car_id={car_id}")
+                    
+                    # Now delete from processed
                     result = await processed_collection.delete_one({"im_ad_id": car_id})
                     if result.deleted_count > 0:
                         removed_count += 1
@@ -591,7 +608,7 @@ class ProcessingQueue:
                         should_be_processed_ids.add(car_id)
                         
                         # Process and store the record
-                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
+                        processed = await processor.process_single_record(raw_doc, site_settings)
                         if processed:
                             await processed_collection.update_one(
                                 {"im_ad_id": car_id},
@@ -605,8 +622,27 @@ class ProcessingQueue:
                 # Step 3: Remove records that no longer pass filters
                 to_remove_ids = current_processed_ids - should_be_processed_ids
                 removed_count = 0
-                
+
                 for car_id in to_remove_ids:
+                    # First get the record to extract WP info for delete job
+                    record_to_delete = await processed_collection.find_one({"im_ad_id": car_id})
+                    
+                    if record_to_delete:
+                        # Create WP delete job BEFORE deleting from processed
+                        wp_post_id = record_to_delete.get("wp_post_id")
+                        queue = self.wp_queues.get(job.site)
+                        
+                        if queue:
+                            await queue.enqueue_job(
+                                action="delete",
+                                ad_id=car_id,
+                                post_id=wp_post_id,
+                                changed_fields=["status"],
+                                hash_groups={},
+                                reason="filter_exclusion"
+                            )
+                    
+                    # Now delete from processed
                     result = await processed_collection.delete_one({"im_ad_id": car_id})
                     if result.deleted_count > 0:
                         removed_count += 1
