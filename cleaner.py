@@ -230,7 +230,7 @@ class Cleaner:
         try:
             # Get safety delay from config
             safety_delay = timedelta(minutes=config.INACTIVE_CLEANUP_DELAY_MINUTES)
-            cutoff_time = datetime.utcnow().replace(tzinfo=datetime.timezone.utc) - safety_delay
+            cutoff_time = datetime.utcnow().replace(tzinfo=timezone.utc) - safety_delay
             
             # Find all inactive records
             inactive_records = []
