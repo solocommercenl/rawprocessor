@@ -331,10 +331,17 @@ class QueuedTriggerSystem:
         """
         Handle processed collection changes - queue WordPress jobs.
         FIXED: Prevents infinite loops from wp_post_id tracking updates.
+        FIXED: Ignores processed record deletions (final step - no WP action needed).
         """
         try:
-            # 🚨 FIX: Check if this is just a WordPress tracking update
             operation_type = change.get("operationType")
+            
+            # 🚨 FIX: Ignore delete operations - processed deletion is the final step
+            if operation_type == "delete":
+                logger.debug(f"[{site}] Ignoring processed record deletion - no WP job needed")
+                return  # Exit early - NO JOB CREATED
+            
+            # 🚨 FIX: Check if this is just a WordPress tracking update
             if operation_type in ("update", "replace"):
                 update_desc = change.get("updateDescription", {})
                 updated_fields = set(update_desc.get("updatedFields", {}).keys())
@@ -395,18 +402,6 @@ class QueuedTriggerSystem:
                     reason="processed_update"
                 )
                 logger.debug(f"[{site}] Queued {action} WP job for ad_id={ad_id}")
-                
-            elif operation_type == "delete":
-                # Processed record deleted - queue delete job
-                await queue.enqueue_job(
-                    action="delete",
-                    ad_id=ad_id,
-                    post_id=post_id,
-                    changed_fields=["status"],
-                    hash_groups={},
-                    reason="processed_delete"
-                )
-                logger.debug(f"[{site}] Queued delete WP job for ad_id={ad_id}")
                 
         except Exception as ex:
             logger.error(f"[{site}] Error handling processed change: {ex}")
