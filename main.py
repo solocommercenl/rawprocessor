@@ -274,6 +274,39 @@ async def handle_preprocess(args):
         
         if total_deleted > 0:
             logger.info("Recommendation: Restart processing to ensure clean pipeline")
+@log_exceptions
+async def handle_manual_maintenance():
+    """
+    Run the same maintenance tasks that run every 8 hours.
+    """
+    logger.info("Running manual maintenance cycle...")
+    
+    cleaner = Cleaner(db)
+    
+    try:
+        # Run data quality cleanup (same as 8-hour cycle)
+        logger.info("Running data quality cleanup...")
+        stats = await cleaner.cleanup_raw_collection()
+        
+        total_deleted = stats.get("total_deleted", 0)
+        duration = stats.get("duration_seconds", 0)
+        
+        logger.info(f"Data quality cleanup completed: {total_deleted} records deleted in {duration:.2f}s")
+        
+        # Run inactive record cleanup (same as 8-hour cycle)
+        logger.info("Running inactive records cleanup...")
+        inactive_stats = await cleaner.cleanup_inactive_records()
+        
+        inactive_deleted = inactive_stats.get("deleted_from_raw", 0) + inactive_stats.get("deleted_from_processed", 0)
+        inactive_duration = inactive_stats.get("duration_seconds", 0)
+        
+        logger.info(f"Inactive cleanup completed: {inactive_deleted} records deleted in {inactive_duration:.2f}s")
+        
+        logger.info("Manual maintenance cycle completed successfully")
+        
+    except Exception as ex:
+        logger.error(f"Error during manual maintenance: {ex}")
+        raise
 
 @log_exceptions
 async def handle_status():
@@ -480,7 +513,8 @@ Examples:
     parser.add_argument("--hours", type=int, help="Hours for cleanup operations")
     parser.add_argument("--processing", action="store_true", help="Target processing queue instead of WP queue")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done without actually doing it")
-    
+    parser.add_argument("--maintenance", action="store_true", help="Run full 8-hour maintenance cycle manually")
+
     # Logging
     parser.add_argument("--log-level", default=config.LOG_LEVEL, choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     
@@ -520,6 +554,8 @@ Examples:
             await handle_cleanup_jobs(args)
         elif args.preprocess:
             await handle_preprocess(args)
+        elif args.maintenance:
+            await handle_manual_maintenance()
         else:
             parser.print_help()
             
