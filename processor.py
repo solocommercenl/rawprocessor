@@ -122,35 +122,34 @@ class Processor:
     async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
         """
         Build the complete processed document matching the target structure.
-        FIXED: JetEngine CLI expects arrays for both checkboxes AND gallery fields.
+        JetEngine CLI expects arrays for both checkboxes AND gallery fields.
         """
         doc: Dict[str, Any] = {}
 
         # === CORE IDENTIFIERS ===
         doc["im_ad_id"] = raw.get("car_id", "")
         
-        # === TITLE (Brand + Model + Title) ===
-        make = raw.get("brand", "")
-        model = raw.get("model", "")  
+        # === EXTRACT ORIGINAL MAKE/MODEL FOR CERTAIN FIELDS ===
+        original_make = raw.get("brand", "")
+        original_model = raw.get("model", "")  # Keep original for im_make_model and title
+        
+        # === TITLE (Brand + Model + Title) - USES ORIGINAL MODEL ===
         title_suffix = raw.get("title", "")
-        doc["im_title"] = f"{make} {model} {title_suffix}".strip()
+        doc["im_title"] = f"{original_make} {original_model} {title_suffix}".strip()
         
         # === GALLERY AND FEATURED IMAGE ===
         images = normalize_gallery(raw.get("Images", []))
-        # FIXED: JetEngine gallery field expects array, not comma-separated string
         doc["im_gallery"] = images  # Keep as array for JetEngine
         doc["im_featured_image"] = images[0] if images else ""
         
         # === BASIC VEHICLE DATA ===
         doc["im_price_org"] = round(float(raw.get("price", 0)), 2)
-        # registration_year should be integer
         doc["im_registration_year"] = int(raw.get("registration_year", 0) or 0)
         doc["im_first_registration"] = raw.get("registration", "")
-        # Handle both 'milage' (typo in source) and 'mileage'
         doc["im_mileage"] = int(raw.get("milage") or raw.get("mileage") or 0)
         doc["im_power"] = raw.get("power", "")
         
-        # === SERVICE HISTORY - FIXED: Convert to Dutch Ja/Nee ===
+        # === SERVICE HISTORY - Convert to Dutch Ja/Nee ===
         fullservicehistory = bool(raw.get("vehiclehistory", {}).get("Fullservicehistory", False))
         doc["im_fullservicehistory"] = "Ja" if fullservicehistory else "Nee"
         
@@ -205,19 +204,21 @@ class Processor:
         doc["im_dealer_contact"] = raw.get("dealer_contact", "")
         doc["im_dealer_phone"] = raw.get("dealer_phone", "")
         doc["im_dealer_city"] = raw.get("dealer_city", "")
-        # Changed im_product_url to im_autoscout
         doc["im_autoscout"] = raw.get("Product_URL", "")
         
         # === VEHICLE SPECIFICATIONS ===
         doc["im_seats"] = int(basicdata.get("Seats", 0) or 0)
         doc["im_body_type"] = basicdata.get("Body", "")
         doc["im_gearbox"] = raw.get("gearbox", "")
-        doc["im_make_model"] = f"{make} {model}".strip()
+        
+        # === MAKE MODEL FIELDS - IMPORTANT DISTINCTION ===
+        # im_make_model: USES ORIGINAL MODEL (no consolidation)
+        doc["im_make_model"] = f"{original_make} {original_model}".strip()
         
         # === EMISSIONS AND VAT ===
         doc["im_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
         
-        # === VAT DEDUCTIBLE - FIXED: Convert to Dutch text values ===
+        # === VAT DEDUCTIBLE - Convert to Dutch text values ===
         vatded = bool(raw.get("vatded", False))
         doc["im_vat_deductible"] = "BTW auto" if vatded else "Marge auto"
         
@@ -225,8 +226,8 @@ class Processor:
         doc["im_vat_filter"] = "btw" if vatded else "marge"
         
         # === TAXONOMIES (for WordPress) ===
-        doc["make"] = make
-        doc["model"] = model  
+        doc["make"] = original_make
+        # model field will be set from translated fields (consolidated model)
         doc["color"] = colour_data.get("Colour", "")
         
         # === STATUS AND TIMESTAMPS ===
@@ -236,7 +237,6 @@ class Processor:
         # === ADD TRANSLATED FIELDS AS ARRAYS (NOT SERIALIZED) ===
         for key, value in translated.items():
             if isinstance(value, list):
-                # FIXED: Keep as arrays for JetEngine CLI import
                 doc[key] = value
             else:
                 doc[key] = value

@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, Any, List, Optional, Union
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
@@ -16,6 +17,51 @@ class Translator:
         if not translation_doc:
             raise RuntimeError(f"Translation profile '{profile_name}' not found in MongoDB.")
         return translation_doc
+
+    async def consolidate_model(self, brand: str, model: str) -> str:
+        """
+        Consolidate model based on brand-specific rules from MongoDB.
+        
+        :param brand: Vehicle brand/make (e.g., "BMW", "Volkswagen")
+        :param model: Original model from raw data (e.g., "Golf GTI", "118i")
+        :return: Consolidated model (e.g., "Golf", "1-serie") or original if no rule matches
+        """
+        if not brand or not model:
+            return model
+        
+        try:
+            # Normalize brand for lookup
+            brand_key = brand.lower().replace(" ", "-").replace("_", "-")
+            
+            # Find rules for this brand
+            rules_doc = await self.db.model_consolidation_rules.find_one({"_id": brand_key})
+            
+            if not rules_doc:
+                logger.debug(f"No model consolidation rules found for brand: {brand}")
+                return model
+            
+            # Apply rules in order (most specific first)
+            for rule in rules_doc.get("rules", []):
+                pattern = rule.get("pattern", "")
+                consolidated_model = rule.get("consolidated_model", "")
+                
+                if not pattern or not consolidated_model:
+                    continue
+                
+                # Check if pattern matches
+                if re.match(pattern, model, re.IGNORECASE):
+                    # Apply substitution (supports capture groups like $1)
+                    result = re.sub(pattern, consolidated_model, model, flags=re.IGNORECASE)
+                    logger.debug(f"Model consolidation: {brand} {model} -> {result} (rule: {rule.get('description', 'no description')})")
+                    return result
+            
+            # No matching rule found
+            logger.debug(f"No matching rule for {brand} {model}, keeping original")
+            return model
+            
+        except Exception as ex:
+            logger.error(f"Error in model consolidation for {brand} {model}: {ex}")
+            return model  # Fallback to original on error
 
     async def translate_fields(
         self,
@@ -86,6 +132,14 @@ class Translator:
                 color, "color", translation_map, site, "color", record_id
             )
             output["color"] = translated_color
+
+        # MODEL CONSOLIDATION - consolidate model based on brand-specific rules
+        brand = raw.get("brand", "")
+        model = raw.get("model", "")
+        if brand and model:
+            consolidated_model = await self.consolidate_model(brand, model)
+            output["model"] = consolidated_model  # This goes to the model taxonomy field
+            logger.debug(f"Model consolidation: {brand} {model} -> {consolidated_model} | record_id={record_id}")
 
         # EQUIPMENT/OPTIONS - from Equipment nested structure
         equipment = raw.get("Equipment", {})
