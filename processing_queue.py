@@ -496,8 +496,8 @@ class ProcessingQueue:
 
     async def _process_filter_changes(self, job: ProcessingJob, processor: Processor, site_settings: Dict[str, Any], worker_id: int) -> bool:
         """
-        COMPLETE: Efficient filter change processing - handles inclusions, exclusions, and any filter changes.
-        Only creates jobs for records that are actually affected by the change.
+        FIXED: Only processes records actually affected by filter changes.
+        No more spurious create/update jobs for unchanged records.
         """
         try:
             # FORCE clear site settings cache and reload fresh settings
@@ -515,166 +515,125 @@ class ProcessingQueue:
             processed_collection = self.db[f"processed_{job.site}"]
 
             if batch_number is not None:
-                # Batch processing for large datasets
+                # FIXED: Process raw records individually and check each one
                 skip = payload.get("skip", 0)
                 limit = payload.get("limit", self.batch_size)
 
                 logger.info(f"Worker {worker_id} processing filter batch {batch_number + 1}/{payload.get('total_batches')} for site {job.site}")
 
-                # STEP 1: Get current processed records in this batch
-                current_processed_ids = set()
-                processed_records = {}
-                async for doc in processed_collection.find({}).skip(skip).limit(limit):
-                    car_id = doc.get("im_ad_id")
-                    if car_id:
-                        current_processed_ids.add(car_id)
-                        processed_records[car_id] = doc
-
-                # STEP 2: Get raw records that pass NEW filters in this batch range
-                should_be_processed_ids = set()
-                raw_records = {}
+                removed_count = 0
+                added_count = 0
                 
-                # Get raw records in the same batch range
+                # Process raw records in this batch individually
                 async for raw_doc in self.db.raw.find({"listing_status": True}).skip(skip).limit(limit):
                     car_id = raw_doc.get("car_id")
                     if not car_id:
                         continue
+                    
+                    # Check if this record passes NEW filters
+                    passes_new_filters = check_raw_against_filters(raw_doc, new_filters)
+                    
+                    # Check if record exists in processed collection
+                    existing_processed = await processed_collection.find_one({"im_ad_id": car_id})
+                    
+                    if existing_processed and not passes_new_filters:
+                        # Record exists but no longer passes filters - REMOVE
+                        wp_post_id = existing_processed.get("wp_post_id")
                         
-                    # Check if this raw record passes the NEW filters
-                    if check_raw_against_filters(raw_doc, new_filters):
-                        should_be_processed_ids.add(car_id)
-                        raw_records[car_id] = raw_doc
+                        # Create WP delete job BEFORE deleting from processed
+                        queue = self.wp_queues.get(job.site)
+                        if queue and wp_post_id:
+                            await queue.enqueue_job(
+                                action="delete",
+                                ad_id=car_id,
+                                post_id=wp_post_id,
+                                changed_fields=["status"],
+                                hash_groups={},
+                                reason="filter_exclusion"
+                            )
+                            logger.debug(f"Worker {worker_id} queued WP delete for excluded {car_id}")
 
-                # STEP 3: Calculate what needs to change
-                to_remove = current_processed_ids - should_be_processed_ids  # In processed but shouldn't be
-                to_add = should_be_processed_ids - current_processed_ids     # Should be processed but isn't
-
-                removed_count = 0
-                added_count = 0
-
-                # STEP 4: Remove records that no longer pass filters
-                for car_id in to_remove:
-                    processed_doc = processed_records[car_id]
-                    wp_post_id = processed_doc.get("wp_post_id")
+                        # Delete from processed
+                        result = await processed_collection.delete_one({"im_ad_id": car_id})
+                        if result.deleted_count > 0:
+                            removed_count += 1
+                            logger.debug(f"Worker {worker_id} removed {car_id} (no longer passes filters)")
                     
-                    # Create WP delete job BEFORE deleting from processed
-                    queue = self.wp_queues.get(job.site)
-                    if queue and wp_post_id:
-                        await queue.enqueue_job(
-                            action="delete",
-                            ad_id=car_id,
-                            post_id=wp_post_id,
-                            changed_fields=["status"],
-                            hash_groups={},
-                            reason="filter_exclusion"
-                        )
-                        logger.debug(f"Worker {worker_id} queued WP delete for excluded {car_id}")
-
-                    # Delete from processed
-                    result = await processed_collection.delete_one({"im_ad_id": car_id})
-                    if result.deleted_count > 0:
-                        removed_count += 1
-
-                # STEP 5: Add records that now pass filters
-                for car_id in to_add:
-                    raw_doc = raw_records[car_id]
+                    elif not existing_processed and passes_new_filters:
+                        # Record doesn't exist but now passes filters - ADD
+                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
+                        if processed:
+                            await processed_collection.update_one(
+                                {"im_ad_id": car_id},
+                                {"$set": processed},
+                                upsert=True
+                            )
+                            added_count += 1
+                            logger.debug(f"Worker {worker_id} added {car_id} (now passes filters)")
                     
-                    # Process the record
-                    processed = await processor.process_single_record(raw_doc, fresh_site_settings)
-                    if processed:
-                        await processed_collection.update_one(
-                            {"im_ad_id": car_id},
-                            {"$set": processed},
-                            upsert=True
-                        )
-                        added_count += 1
-                        logger.debug(f"Worker {worker_id} added {car_id} (now passes filters)")
+                    # If existing_processed and passes_new_filters: NO ACTION (record stays)
+                    # If not existing_processed and not passes_new_filters: NO ACTION (record stays excluded)
 
                 logger.info(f"Worker {worker_id} completed filter batch {batch_number + 1}/{payload.get('total_batches')} for site {job.site}: removed {removed_count}, added {added_count}")
 
             else:
-                # Non-batch processing - handle all records efficiently
+                # Non-batch processing - same logic for all records
                 logger.info(f"Worker {worker_id} starting full filter processing for site {job.site}")
                 
-                # STEP 1: Get ALL current processed record IDs
-                current_processed_ids = set()
-                processed_records = {}
-                async for doc in processed_collection.find({}, {"im_ad_id": 1, "wp_post_id": 1}):
-                    car_id = doc.get("im_ad_id")
-                    if car_id:
-                        current_processed_ids.add(car_id)
-                        processed_records[car_id] = doc
-
-                logger.info(f"Worker {worker_id} found {len(current_processed_ids)} existing processed records")
-
-                # STEP 2: Get ALL raw records that pass NEW filters
-                should_be_processed_ids = set()
-                raw_records = {}
+                removed_count = 0
+                added_count = 0
                 
+                # Process ALL raw records individually
                 async for raw_doc in self.db.raw.find({"listing_status": True}):
                     car_id = raw_doc.get("car_id")
                     if not car_id:
                         continue
+                    
+                    # Check if this record passes NEW filters
+                    passes_new_filters = check_raw_against_filters(raw_doc, new_filters)
+                    
+                    # Check if record exists in processed collection
+                    existing_processed = await processed_collection.find_one({"im_ad_id": car_id})
+                    
+                    if existing_processed and not passes_new_filters:
+                        # Record exists but no longer passes filters - REMOVE
+                        wp_post_id = existing_processed.get("wp_post_id")
                         
-                    # Check if this raw record passes the NEW filters
-                    if check_raw_against_filters(raw_doc, new_filters):
-                        should_be_processed_ids.add(car_id)
-                        raw_records[car_id] = raw_doc
+                        # Create WP delete job BEFORE deleting from processed
+                        queue = self.wp_queues.get(job.site)
+                        if queue and wp_post_id:
+                            await queue.enqueue_job(
+                                action="delete",
+                                ad_id=car_id,
+                                post_id=wp_post_id,
+                                changed_fields=["status"],
+                                hash_groups={},
+                                reason="filter_exclusion"
+                            )
 
-                logger.info(f"Worker {worker_id} found {len(should_be_processed_ids)} raw records that pass new filters")
+                        # Delete from processed
+                        result = await processed_collection.delete_one({"im_ad_id": car_id})
+                        if result.deleted_count > 0:
+                            removed_count += 1
 
-                # STEP 3: Calculate what needs to change
-                to_remove = current_processed_ids - should_be_processed_ids  # In processed but shouldn't be
-                to_add = should_be_processed_ids - current_processed_ids     # Should be processed but isn't
-
-                logger.info(f"Worker {worker_id} changes needed: remove {len(to_remove)}, add {len(to_add)}")
-
-                removed_count = 0
-                added_count = 0
-
-                # STEP 4: Remove records that no longer pass filters
-                for car_id in to_remove:
-                    processed_doc = processed_records[car_id]
-                    wp_post_id = processed_doc.get("wp_post_id")
+                        # Log progress for large operations
+                        if removed_count % 100 == 0:
+                            logger.info(f"Worker {worker_id} removed {removed_count} records so far")
                     
-                    # Create WP delete job BEFORE deleting from processed
-                    queue = self.wp_queues.get(job.site)
-                    if queue and wp_post_id:
-                        await queue.enqueue_job(
-                            action="delete",
-                            ad_id=car_id,
-                            post_id=wp_post_id,
-                            changed_fields=["status"],
-                            hash_groups={},
-                            reason="filter_exclusion"
-                        )
+                    elif not existing_processed and passes_new_filters:
+                        # Record doesn't exist but now passes filters - ADD
+                        processed = await processor.process_single_record(raw_doc, fresh_site_settings)
+                        if processed:
+                            await processed_collection.update_one(
+                                {"im_ad_id": car_id},
+                                {"$set": processed},
+                                upsert=True
+                            )
+                            added_count += 1
 
-                    # Delete from processed
-                    result = await processed_collection.delete_one({"im_ad_id": car_id})
-                    if result.deleted_count > 0:
-                        removed_count += 1
-
-                    # Log progress for large operations
-                    if removed_count % 100 == 0:
-                        logger.info(f"Worker {worker_id} removed {removed_count}/{len(to_remove)} records")
-
-                # STEP 5: Add records that now pass filters
-                for car_id in to_add:
-                    raw_doc = raw_records[car_id]
-                    
-                    # Process the record
-                    processed = await processor.process_single_record(raw_doc, fresh_site_settings)
-                    if processed:
-                        await processed_collection.update_one(
-                            {"im_ad_id": car_id},
-                            {"$set": processed},
-                            upsert=True
-                        )
-                        added_count += 1
-
-                    # Log progress for large operations
-                    if added_count % 100 == 0:
-                        logger.info(f"Worker {worker_id} added {added_count}/{len(to_add)} records")
+                        # Log progress for large operations
+                        if added_count % 100 == 0:
+                            logger.info(f"Worker {worker_id} added {added_count} records so far")
 
                 logger.info(f"Worker {worker_id} completed full filter processing for site {job.site}: removed {removed_count}, added {added_count}")
             
