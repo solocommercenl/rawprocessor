@@ -13,7 +13,7 @@ Logic Flow: Record → Check Images (≥4) → Check Emissions Validity → Chec
 from typing import Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import config
 
