@@ -1,24 +1,4 @@
-"""
-processing_queue.py
-
-Queued processing system for rawprocessor Stage 1.
-Handles high-volume raw changes and site settings changes through a robust queue system.
-
-UPDATED: Now uses centralized configuration system instead of hard-coded values.
-FIXED: Proper filter change logic that handles add/remove operations correctly.
-
-Architecture:
-Raw/Settings Change → Queue Processing Job → Worker Processes → Update Processed → Trigger WP Jobs
-
-Features:
-- MongoDB-based queue with priority, retry logic, and backpressure
-- Configurable worker pools with batch processing
-- Smart batching for site settings changes (200K records)
-- Burst absorption and rate limiting
-- Dead letter queue for failed jobs
-- Comprehensive monitoring and metrics
-- PROPER filter change handling (adds/removes records correctly)
-"""
+#processing_queue.py
 
 import asyncio
 import json

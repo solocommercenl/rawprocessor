@@ -98,6 +98,13 @@ async def run_periodic_cleanup():
             
             logger.info(f"Periodic cleanup completed: {total_deleted} records deleted in {duration:.2f}s")
             
+            inactive_stats = await cleaner.cleanup_inactive_records()
+        
+            inactive_deleted = inactive_stats.get("deleted_from_raw", 0) + inactive_stats.get("deleted_from_processed", 0)
+            inactive_duration = inactive_stats.get("duration_seconds", 0)
+            
+            logger.info(f"Inactive cleanup completed: {inactive_deleted} records deleted in {inactive_duration:.2f}s")
+        
         except Exception as ex:
             logger.error(f"Error during periodic cleanup: {ex}")
 

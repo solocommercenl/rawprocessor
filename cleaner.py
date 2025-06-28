@@ -6,13 +6,14 @@ Runs based on configured interval to delete invalid records from raw collection.
 This is a true preprocessor that maintains database cleanliness.
 
 UPDATED: Enhanced with complete data quality logic matching utils_filters.py
+UPDATED: Added inactive record cleanup for listing_status: false records
 Logic Flow: Record → Check Images (≥4) → Check Emissions Validity → Check Emissions Cap → Pass/Reject
 """
 
 from typing import Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import config
 
@@ -202,6 +203,170 @@ class Cleaner:
             stats["error"] = str(ex)
             raise
 
+    async def cleanup_inactive_records(self) -> Dict[str, Any]:
+        """
+        Clean up inactive records (listing_status: false) from raw and processed collections.
+        Only deletes records that have no pending unpublish jobs and have been inactive for at least 5 minutes.
+        
+        :return: Dictionary with cleanup statistics
+        """
+        logger.info("Starting inactive records cleanup...")
+        start_time = datetime.utcnow()
+        
+        stats = {
+            "start_time": start_time,
+            "inactive_records_found": 0,
+            "records_with_pending_jobs": 0,
+            "records_too_recent": 0,
+            "deleted_from_raw": 0,
+            "deleted_from_processed": 0,
+            "total_processed_collections_checked": 0,
+            "duration_seconds": 0,
+            "config_used": {
+                "safety_delay_minutes": config.INACTIVE_CLEANUP_DELAY_MINUTES
+            }
+        }
+        
+        try:
+            # Get safety delay from config
+            safety_delay = timedelta(minutes=config.INACTIVE_CLEANUP_DELAY_MINUTES)
+            cutoff_time = datetime.utcnow() - safety_delay
+            
+            # Find all inactive records
+            inactive_records = []
+            async for record in self.db.raw.find({"listing_status": False}):
+                stats["inactive_records_found"] += 1
+                
+                car_id = record.get("car_id")
+                updated_at = record.get("updated_at", record.get("_id").generation_time if record.get("_id") else datetime.utcnow())
+                
+                if not car_id:
+                    continue
+                    
+                # Check if record has been inactive long enough
+                if updated_at > cutoff_time:
+                    stats["records_too_recent"] += 1
+                    logger.debug(f"Skipping {car_id} - too recent ({updated_at})")
+                    continue
+                
+                inactive_records.append({
+                    "car_id": car_id,
+                    "updated_at": updated_at
+                })
+            
+            logger.info(f"Found {len(inactive_records)} inactive records eligible for cleanup (after {safety_delay.total_seconds()/60:.0f}min delay)")
+            
+            if not inactive_records:
+                stats["duration_seconds"] = (datetime.utcnow() - start_time).total_seconds()
+                return stats
+            
+            # Get list of active sites
+            active_sites = []
+            async for site_doc in self.db.site_settings.find({}):
+                site_url = site_doc.get("site_url", "")
+                if site_url:
+                    # Extract site key from site_url (same logic as in queued_trigger_system)
+                    import re
+                    clean_url = site_url.lower().strip()
+                    clean_url = re.sub(r'^https?://', '', clean_url)
+                    clean_url = re.sub(r'^www\.', '', clean_url)
+                    clean_url = clean_url.split('/')[0]
+                    
+                    parts = clean_url.split('.')
+                    if len(parts) >= 2:
+                        domain_part = '.'.join(parts[:-1])
+                    else:
+                        domain_part = clean_url
+                    
+                    site_key = re.sub(r'[^\w]', '_', domain_part)
+                    site_key = re.sub(r'_+', '_', site_key).strip('_')
+                    
+                    if site_key and re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', site_key):
+                        active_sites.append(site_key)
+            
+            logger.info(f"Found {len(active_sites)} active sites: {active_sites}")
+            
+            # Check each inactive record for pending unpublish jobs
+            records_to_delete = []
+            
+            for record in inactive_records:
+                car_id = record["car_id"]
+                has_pending_jobs = False
+                
+                # Check all site WP queues for pending unpublish jobs
+                for site in active_sites:
+                    queue_collection = f"wp_sync_queue_{site}"
+                    
+                    try:
+                        pending_unpublish = await self.db[queue_collection].count_documents({
+                            "ad_id": car_id,
+                            "action": {"$in": ["unpublish", "delete"]},
+                            "status": "pending"
+                        })
+                        
+                        if pending_unpublish > 0:
+                            has_pending_jobs = True
+                            logger.debug(f"Found {pending_unpublish} pending unpublish jobs for {car_id} in {site}")
+                            break
+                            
+                    except Exception as ex:
+                        logger.warning(f"Could not check queue {queue_collection} for {car_id}: {ex}")
+                        # If we can't check, assume there might be pending jobs to be safe
+                        has_pending_jobs = True
+                        break
+                
+                if has_pending_jobs:
+                    stats["records_with_pending_jobs"] += 1
+                    logger.debug(f"Skipping {car_id} - has pending unpublish jobs")
+                else:
+                    records_to_delete.append(car_id)
+            
+            logger.info(f"Ready to delete {len(records_to_delete)} inactive records (no pending jobs)")
+            
+            # Delete records from raw collection
+            if records_to_delete:
+                raw_result = await self.db.raw.delete_many({"car_id": {"$in": records_to_delete}})
+                stats["deleted_from_raw"] = raw_result.deleted_count
+                logger.info(f"Deleted {stats['deleted_from_raw']} inactive records from raw collection")
+                
+                # Delete from all processed collections
+                for site in active_sites:
+                    processed_collection = f"processed_{site}"
+                    
+                    try:
+                        processed_result = await self.db[processed_collection].delete_many({
+                            "im_ad_id": {"$in": records_to_delete}
+                        })
+                        
+                        if processed_result.deleted_count > 0:
+                            stats["deleted_from_processed"] += processed_result.deleted_count
+                            logger.info(f"Deleted {processed_result.deleted_count} inactive records from {processed_collection}")
+                        
+                        stats["total_processed_collections_checked"] += 1
+                        
+                    except Exception as ex:
+                        logger.warning(f"Could not delete from {processed_collection}: {ex}")
+            
+            # Calculate final statistics
+            end_time = datetime.utcnow()
+            stats["duration_seconds"] = (end_time - start_time).total_seconds()
+            
+            logger.info("Inactive records cleanup completed successfully:")
+            logger.info(f"  - Inactive records found: {stats['inactive_records_found']}")
+            logger.info(f"  - Skipped (pending jobs): {stats['records_with_pending_jobs']}")
+            logger.info(f"  - Skipped (too recent): {stats['records_too_recent']}")
+            logger.info(f"  - Deleted from raw: {stats['deleted_from_raw']}")
+            logger.info(f"  - Deleted from processed: {stats['deleted_from_processed']}")
+            logger.info(f"  - Duration: {stats['duration_seconds']:.2f} seconds")
+            
+            return stats
+            
+        except Exception as ex:
+            logger.error(f"Error during inactive records cleanup: {ex}")
+            stats["error"] = str(ex)
+            stats["duration_seconds"] = (datetime.utcnow() - start_time).total_seconds()
+            raise
+
     async def _get_processing_car_ids(self) -> list:
         """
         Get list of car_ids that are currently being processed.
@@ -306,12 +471,23 @@ class Cleaner:
             
             invalid_emissions_count = await self.db.raw.count_documents(invalid_emissions_query)
             
+            # === STEP 6: Count inactive records ===
+            safety_delay = timedelta(minutes=config.INACTIVE_CLEANUP_DELAY_MINUTES)
+            cutoff_time = datetime.utcnow() - safety_delay
+            
+            inactive_query = {
+                "listing_status": False,
+                "updated_at": {"$lt": cutoff_time}
+            }
+            inactive_count = await self.db.raw.count_documents(inactive_query)
+            
             total_candidates = (
                 images_count + 
                 missing_emissions_count + 
                 high_emissions_count + 
                 invalid_zero_count + 
-                invalid_emissions_count
+                invalid_emissions_count +
+                inactive_count
             )
             
             return {
@@ -320,12 +496,14 @@ class Cleaner:
                 "emissions_too_high": high_emissions_count,
                 "invalid_zero_emissions": invalid_zero_count,
                 "invalid_emissions_value": invalid_emissions_count,
+                "inactive_records": inactive_count,
                 "total_candidates": total_candidates,
                 "protected_by_processing": len(processing_car_ids),
                 "config_used": {
                     "min_images_required": self.min_images_required,
                     "emissions_threshold": self.emissions_threshold,
-                    "emissions_cap": self.emissions_cap
+                    "emissions_cap": self.emissions_cap,
+                    "inactive_delay_minutes": config.INACTIVE_CLEANUP_DELAY_MINUTES
                 }
             }
             
@@ -337,12 +515,14 @@ class Cleaner:
                 "emissions_too_high": 0,
                 "invalid_zero_emissions": 0,
                 "invalid_emissions_value": 0,
+                "inactive_records": 0,
                 "total_candidates": 0,
                 "protected_by_processing": 0,
                 "config_used": {
                     "min_images_required": self.min_images_required,
                     "emissions_threshold": self.emissions_threshold,
-                    "emissions_cap": self.emissions_cap
+                    "emissions_cap": self.emissions_cap,
+                    "inactive_delay_minutes": config.INACTIVE_CLEANUP_DELAY_MINUTES
                 },
                 "error": str(ex)
             }
@@ -374,6 +554,13 @@ class Cleaner:
         elif self.emissions_cap > 1000:
             warnings.append(f"EMISSIONS_CAP ({self.emissions_cap}) is very high - may not catch data quality issues")
         
+        # Check inactive cleanup delay
+        if hasattr(config, 'INACTIVE_CLEANUP_DELAY_MINUTES'):
+            if config.INACTIVE_CLEANUP_DELAY_MINUTES < 1:
+                warnings.append(f"INACTIVE_CLEANUP_DELAY_MINUTES ({config.INACTIVE_CLEANUP_DELAY_MINUTES}) is very short")
+            elif config.INACTIVE_CLEANUP_DELAY_MINUTES > 60:
+                warnings.append(f"INACTIVE_CLEANUP_DELAY_MINUTES ({config.INACTIVE_CLEANUP_DELAY_MINUTES}) is quite long")
+        
         return {
             "valid": len(issues) == 0,
             "issues": issues,
@@ -381,7 +568,8 @@ class Cleaner:
             "configuration": {
                 "min_images_required": self.min_images_required,
                 "emissions_threshold": self.emissions_threshold,
-                "emissions_cap": self.emissions_cap
+                "emissions_cap": self.emissions_cap,
+                "inactive_cleanup_delay": getattr(config, 'INACTIVE_CLEANUP_DELAY_MINUTES', 'not_configured')
             }
         }
 
@@ -421,6 +609,7 @@ class Cleaner:
                     "min_images": self.min_images_required,
                     "emissions_threshold": self.emissions_threshold,
                     "emissions_cap": self.emissions_cap,
+                    "inactive_delay_minutes": config.INACTIVE_CLEANUP_DELAY_MINUTES,
                     "pure_electric_exemption": "Only pure electric cars can have missing emissions"
                 }
             }

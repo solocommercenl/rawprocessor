@@ -1,17 +1,5 @@
-"""
-queued_trigger_system.py
+#queued_trigger_system.py
 
-Updated trigger system that uses the processing queue for handling raw changes and site settings.
-This provides better performance and reliability for high-volume operations.
-
-FIXED: Robust site detection logic that works with any domain format.
-FIXED: Infinite loop prevention for WordPress post_id tracking updates.
-FIXED: Corrected price_margins categorization and added cache clearing for both filter and pricing changes.
-
-Architecture:
-Raw Changes → Queue Processing Jobs → Workers Update Processed → Processed Changes → Queue WP Jobs
-Site Settings → Queue Processing Jobs → Workers Update Processed → Processed Changes → Queue WP Jobs
-"""
 
 import asyncio
 from typing import Dict, Any, List

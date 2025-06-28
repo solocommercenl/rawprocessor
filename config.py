@@ -68,6 +68,7 @@ class Config:
     CLEANUP_INTERVAL_HOURS = get_env_int("CLEANUP_INTERVAL_HOURS", 8)
     MAINTENANCE_INTERVAL_HOURS = get_env_int("MAINTENANCE_INTERVAL_HOURS", 1)
     JOB_CLEANUP_RETENTION_HOURS = get_env_int("JOB_CLEANUP_RETENTION_HOURS", 24)
+    INACTIVE_CLEANUP_DELAY_MINUTES = get_env_int("INACTIVE_CLEANUP_DELAY_MINUTES", 5)
     
     # === DATA QUALITY RULES ===
     MIN_IMAGES_REQUIRED = get_env_int("MIN_IMAGES_REQUIRED", 4)
@@ -162,7 +163,8 @@ class Config:
             "maintenance": {
                 "cleanup_hours": cls.CLEANUP_INTERVAL_HOURS,
                 "maintenance_hours": cls.MAINTENANCE_INTERVAL_HOURS,
-                "retention_hours": cls.JOB_CLEANUP_RETENTION_HOURS
+                "retention_hours": cls.JOB_CLEANUP_RETENTION_HOURS,
+                "inactive_delay_minutes": cls.INACTIVE_CLEANUP_DELAY_MINUTES
             },
             "data_quality": {
                 "min_images": cls.MIN_IMAGES_REQUIRED,
