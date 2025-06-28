@@ -444,13 +444,18 @@ class QueuedTriggerSystem:
             pricing_fields = [
                 "licence_plate_fee", "rdw_inspection", "transport_cost", 
                 "unforeseen_percentage", "annual_interest_rate", "loan_term_months",
-                "price_margins"  # FIXED: Moved from filter_fields to pricing_fields
+                "price_margins"
             ]
-            if any(field in updated_fields for field in pricing_fields):
-                # FIXED: Clear cache before queueing pricing jobs
+            pricing_changed = any(
+                field in pricing_fields or any(field.startswith(pf + ".") for pf in pricing_fields)
+                for field in updated_fields
+            )
+            if pricing_changed:
+                pricing_changed_fields = [f for f in updated_fields 
+                                        if f in pricing_fields or any(f.startswith(pf + ".") for pf in pricing_fields)]
                 SiteSettings.clear_cache(site_key)
                 change_types.append("pricing_changed")
-                logger.info(f"Pricing configuration changed for {site_key} - cache cleared")
+                logger.info(f"Pricing configuration changed for {site_key}: {pricing_changed_fields} - cache cleared")
             
             # Queue processing jobs for each change type
             for change_type in change_types:
