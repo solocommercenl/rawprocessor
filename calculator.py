@@ -183,20 +183,25 @@ class Calculator:
         annual_interest: float, term_months: int
     ) -> float:
         """
-        Calculate monthly payment for leasing.
+        Calculate monthly payment for leasing, including interest on remaining debt.
         """
         try:
             principal = price - down_payment - remaining_debt
             if principal <= 0 or term_months <= 0:
                 return 0.0
-                
+
             monthly_interest = annual_interest / 12
             if monthly_interest == 0:
-                return principal / term_months
-                
+                return round(principal / term_months, 2)
+
+            # Monthly annuity payment on financed principal
             payment = (principal * monthly_interest) / (1 - (1 + monthly_interest) ** -term_months)
-            return round(payment, 2)
-            
+
+            # Add flat monthly interest on the residual (balloon payment)
+            balloon_interest = remaining_debt * monthly_interest
+
+            return round(payment + balloon_interest, 2)
+
         except Exception as ex:
             logger.error("Monthly payment calculation failed: %s", ex)
             return 0.0
