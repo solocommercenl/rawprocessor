@@ -1,0 +1,338 @@
+"""
+voorraad_processor.py
+
+Processor for voorraad cars from voorraad_raw collection.
+Simplified processing - no VAT/BPM calculations, only leasing.
+Routes to processed_voorraad_{site} based on site field.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from loguru import logger
+
+from site_settings import SiteSettings
+from utils import (
+    calculate_hash_groups, normalize_gallery, extract_power_values,
+    extract_numeric_value
+)
+from utils_filters import is_record_clean
+
+class VoorraadProcessor:
+    """Processor for voorraad cars with simplified calculations."""
+    
+    def __init__(self, db: AsyncIOMotorDatabase):
+        self.db = db
+        self.raw_collection = db["voorraad_raw"]
+        
+    async def process_by_site(self, site: str):
+        """
+        Process all voorraad_raw records for a specific site.
+        Used for manual processing or rebuilds.
+        """
+        settings = await SiteSettings(self.db).get(site)
+        processed_collection = self.db[f"processed_voorraad_{site}"]
+        
+        # Get all active records for this site
+        cursor = self.raw_collection.find({
+            "listing_status": True,
+            "site": site
+        })
+        
+        processed_count = 0
+        skipped_count = 0
+        
+        logger.info(f"[voorraad_{site}] Starting bulk processing")
+        
+        async for raw in cursor:
+            try:
+                processed = await self.process_single_record(raw, site, settings)
+                if processed:
+                    # Store in processed collection
+                    await self._store_processed(processed, processed_collection)
+                    processed_count += 1
+                else:
+                    skipped_count += 1
+                    
+            except Exception as ex:
+                logger.error(f"[voorraad_{site}] Error processing {raw.get('car_id')}: {ex}")
+                skipped_count += 1
+        
+        logger.info(f"[voorraad_{site}] Complete: {processed_count} processed, {skipped_count} skipped")
+    
+    async def process_single_record(self, raw: dict, site: str, site_settings: dict = None) -> Optional[dict]:
+        """Process a single voorraad_raw record."""
+        
+        record_id = raw.get("car_id", "unknown")
+        
+        try:
+            # Get site settings if not provided
+            if not site_settings:
+                site_settings = await SiteSettings(self.db).get(site)
+            
+            # Basic quality check
+            if not is_record_clean(raw):
+                logger.debug(f"[voorraad_{site}] Skipping dirty record: {record_id}")
+                return None
+            
+            # Process the record
+            processed = await self._process(raw, site, site_settings)
+            if not processed:
+                return None
+            
+            # Check if this is a new record
+            processed_collection = self.db[f"processed_voorraad_{site}"]
+            existing = await processed_collection.find_one({"st_ad_id": processed["st_ad_id"]})
+            processed["_is_new"] = not bool(existing)
+            
+            # Calculate hash groups for change detection
+            processed["hashes"] = calculate_hash_groups(processed)
+            
+            logger.debug(f"[voorraad_{site}] Successfully processed: {record_id}")
+            return processed
+            
+        except Exception as ex:
+            logger.error(f"[voorraad_{site}] Error processing {record_id}: {ex}")
+            return None
+    
+    async def _process(self, raw: dict, site: str, site_settings: dict) -> Optional[dict]:
+        """Build the processed document with translations and calculations."""
+        
+        doc: Dict[str, Any] = {}
+        
+        # Core identifiers
+        doc["st_ad_id"] = raw.get("car_id", "")
+        doc["st_url"] = raw.get("Product_URL", "")
+        doc["st_mongo_id"] = str(raw.get("_id", ""))
+        
+        # Title generation
+        brand = raw.get("brand", "")
+        model = raw.get("model", "")
+        title = raw.get("title", "")
+        doc["st_title"] = f"{brand} {model} {title}".strip()
+        
+        # Gallery and featured image
+        images = normalize_gallery(raw.get("Images", []))
+        doc["st_gallery"] = images  # Keep as array for JetEngine
+        doc["st_featured_image"] = images[0] if images else ""
+        
+        # Basic vehicle data
+        doc["st_price"] = float(raw.get("price", 0))
+        doc["st_mileage"] = int(raw.get("milage", 0) or raw.get("mileage", 0))
+        doc["st_first_registration"] = raw.get("registration", "")
+        doc["st_registration_year"] = int(raw.get("registration_year", 0) or 0)
+        
+        # Power
+        doc["st_power"] = raw.get("power", "")
+        doc["st_kw_power"] = raw.get("kw_power", 0)
+        doc["st_hp_power"] = raw.get("hp_power", 0)
+        
+        # Translate gearbox
+        gearbox = raw.get("gearbox", "") or raw.get("TechnicalData", {}).get("Gearbox", "")
+        doc["st_gearbox"] = await self._translate_field(gearbox, "gearbox")
+        
+        # Technical data
+        technical_data = raw.get("TechnicalData", {})
+        basic_data = raw.get("Basicdata", {})
+        
+        doc["st_doors"] = str(basic_data.get("Doors", ""))
+        doc["st_seats"] = int(basic_data.get("Seats", 0) or 0)
+        doc["st_cylinders"] = str(technical_data.get("Cylinders", ""))
+        
+        # Extract cylinder capacity from Enginesize
+        engine_size = technical_data.get("Enginesize", "")
+        doc["st_cylinder_capacity"] = extract_numeric_value(engine_size)
+        
+        # Translate body type
+        body_type = basic_data.get("Body", "")
+        doc["st_body_type"] = await self._translate_field(body_type, "body_type")
+        
+        # Translate drivetrain
+        drivetrain = basic_data.get("Drivetrain", "")
+        doc["st_drivetrain"] = await self._translate_field(drivetrain, "drivetrain")
+        
+        # Fuel type
+        fuel_type = raw.get("energyconsumption", {}).get("Fueltype", "")
+        doc["st_fuel_type"] = await self._translate_field(fuel_type, "fuel_type")
+        
+        # Emissions
+        doc["st_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
+        
+        # Service history
+        full_service = raw.get("vehiclehistory", {}).get("Fullservicehistory", False)
+        doc["st_fullservicehistory"] = "Ja" if full_service else "Nee"
+        
+        # VAT fields (pass through, no calculations)
+        vatded = bool(raw.get("vatded", False))
+        doc["st_vat_deductible"] = "BTW auto" if vatded else "Marge auto"
+        doc["st_vat_filter"] = "btw" if vatded else "marge"
+        
+        # Equipment/features - translate arrays
+        equipment = raw.get("Equipment", {})
+        doc["st_comfort_convenience"] = await self._translate_equipment(
+            equipment.get("ComfortConvenience", []), "comfort_convenience"
+        )
+        doc["st_entertainment_media"] = await self._translate_equipment(
+            equipment.get("EntertainmentMedia", []) or equipment.get("entertainmentAndMedia", []), 
+            "entertainment_media"
+        )
+        doc["st_safety_security"] = await self._translate_equipment(
+            equipment.get("SafetySecurity", []), "safety_security"
+        )
+        doc["st_extras"] = await self._translate_equipment(
+            equipment.get("Extras", []), "extras"
+        )
+        
+        # Taxonomies
+        doc["make"] = brand
+        doc["model"] = model
+        # Note: color field not in voorraad_raw data
+        doc["color"] = ""
+        
+        # Status and timestamps
+        doc["st_status"] = "True" if raw.get("listing_status") else "False"
+        doc["updated_at"] = datetime.utcnow()
+        doc["site"] = site
+        
+        # Calculate leasing (simplified - no VAT/BPM)
+        leasing = await self._calculate_leasing(doc["st_price"], site_settings)
+        doc.update(leasing)
+        
+        return doc
+    
+    async def _translate_field(self, value: str, translation_key: str) -> str:
+        """Translate a single field value using voorraad_translations."""
+        
+        if not value:
+            return value
+        
+        try:
+            trans_doc = await self.db.voorraad_translations.find_one(
+                {"translation_key": translation_key}
+            )
+            
+            if trans_doc and "translations" in trans_doc:
+                translations = trans_doc["translations"]
+                # Try exact match first
+                if value in translations:
+                    return translations[value]
+                # Try case-insensitive match
+                for dutch, english in translations.items():
+                    if dutch.lower() == value.lower():
+                        return english
+            
+            # No translation found, return original
+            return value
+            
+        except Exception as ex:
+            logger.error(f"Translation error for {translation_key}.{value}: {ex}")
+            return value
+    
+    async def _translate_equipment(self, items: List[str], translation_key: str) -> List[str]:
+        """Translate a list of equipment/features."""
+        
+        if not items:
+            return []
+        
+        try:
+            trans_doc = await self.db.voorraad_translations.find_one(
+                {"translation_key": translation_key}
+            )
+            
+            if not trans_doc or "translations" not in trans_doc:
+                return items
+            
+            translations = trans_doc["translations"]
+            translated = []
+            
+            for item in items:
+                # Try exact match
+                if item in translations:
+                    translated.append(translations[item])
+                else:
+                    # Try case-insensitive
+                    found = False
+                    for dutch, english in translations.items():
+                        if dutch.lower() == item.lower():
+                            translated.append(english)
+                            found = True
+                            break
+                    if not found:
+                        # Keep original if no translation
+                        translated.append(item)
+                        logger.debug(f"No translation for {translation_key}.{item}")
+            
+            return translated
+            
+        except Exception as ex:
+            logger.error(f"Equipment translation error for {translation_key}: {ex}")
+            return items
+    
+    async def _calculate_leasing(self, price: float, site_settings: dict) -> dict:
+        """
+        Calculate leasing fields using site settings.
+        Simplified - no VAT/BPM calculations.
+        """
+        
+        try:
+            # Get financial parameters from site settings
+            annual_interest = float(site_settings.get("annual_interest_rate", 0.08))
+            loan_term_months = int(site_settings.get("loan_term_months", 72))
+            
+            # Fixed percentages for voorraad cars
+            down_payment_pct = 0.10  # 10%
+            remaining_debt_pct = 0.20  # 20%
+            
+            # Calculate amounts
+            down_payment = round(price * down_payment_pct, 2)
+            remaining_debt = round(price * remaining_debt_pct, 2)
+            
+            # Calculate monthly payment
+            principal = price - down_payment - remaining_debt
+            if principal <= 0 or loan_term_months <= 0:
+                monthly_payment = 0.0
+            else:
+                monthly_interest = annual_interest / 12
+                if monthly_interest == 0:
+                    monthly_payment = round(principal / loan_term_months, 2)
+                else:
+                    # Annuity payment on financed principal
+                    payment = (principal * monthly_interest) / (1 - (1 + monthly_interest) ** -loan_term_months)
+                    # Add flat monthly interest on residual
+                    balloon_interest = remaining_debt * monthly_interest
+                    monthly_payment = round(payment + balloon_interest, 2)
+            
+            return {
+                "st_down_payment": int(round(down_payment, 0)),
+                "st_desired_remaining_debt": int(round(remaining_debt, 0)),
+                "st_monthly_payment": int(round(monthly_payment, 0))
+            }
+            
+        except Exception as ex:
+            logger.error(f"Leasing calculation error: {ex}")
+            return {
+                "st_down_payment": 0,
+                "st_desired_remaining_debt": 0,
+                "st_monthly_payment": 0
+            }
+    
+    async def _store_processed(self, processed: dict, processed_collection):
+        """Store or update processed record."""
+        
+        try:
+            result = await processed_collection.replace_one(
+                {"st_ad_id": processed["st_ad_id"]},
+                processed,
+                upsert=True
+            )
+            
+            if result.upserted_id:
+                logger.debug(f"Inserted new record: {processed['st_ad_id']}")
+            else:
+                logger.debug(f"Updated existing record: {processed['st_ad_id']}")
+                
+        except Exception as ex:
+            logger.error(f"Error storing processed record {processed.get('st_ad_id')}: {ex}")
+            raise
