@@ -459,6 +459,24 @@ async def handle_cleanup_jobs(args):
     count = await pq.cleanup_completed_jobs(older_than_hours=hours)
     print(f"Cleaned up {count} completed jobs older than {hours} hours")
 
+@log_exceptions
+async def handle_process_voorraad(args):
+    """Process all voorraad cars for a site."""
+    if not args.site:
+        raise ValueError("--site required for --process-voorraad")
+    
+    from voorraad_processor import VoorraadProcessor
+    
+    print(f"Processing voorraad cars for site: {args.site}")
+    
+    processor = VoorraadProcessor(db)
+    await processor.process_by_site(args.site)
+    
+    # Show results
+    processed_collection = db[f"processed_voorraad_{args.site}"]
+    count = await processed_collection.count_documents({})
+    print(f"✅ Complete! processed_voorraad_{args.site} has {count} documents")
+
 async def main():
     """
     Main entry point - parse arguments and route to appropriate handler.
@@ -504,6 +522,7 @@ Examples:
     parser.add_argument("--queue-status", action="store_true", help="Show detailed queue status")
     parser.add_argument("--cleanup-jobs", action="store_true", help="Clean up old completed jobs")
     parser.add_argument("--preprocess", action="store_true", help="Run manual preprocessing to clean raw collection")
+    parser.add_argument("--process-voorraad", action="store_true", help="Process all voorraad cars for a site (requires --site)")
     
     # Parameters
     parser.add_argument("--site", help="Site to operate on")
@@ -552,6 +571,8 @@ Examples:
             await handle_queue_status(args)
         elif args.cleanup_jobs:
             await handle_cleanup_jobs(args)
+        elif args.process_voorraad:
+            await handle_process_voorraad(args)
         elif args.preprocess:
             await handle_preprocess(args)
         elif args.maintenance:
