@@ -18,7 +18,6 @@ from utils import (
     calculate_hash_groups, normalize_gallery, extract_power_values,
     extract_numeric_value
 )
-from utils_filters import is_record_clean
 
 class VoorraadProcessor:
     """Processor for voorraad cars with simplified calculations."""
@@ -71,11 +70,6 @@ class VoorraadProcessor:
             # Get site settings if not provided
             if not site_settings:
                 site_settings = await SiteSettings(self.db).get(site)
-            
-            # Basic quality check
-            if not is_record_clean(raw):
-                logger.debug(f"[voorraad_{site}] Skipping dirty record: {record_id}")
-                return None
             
             # Process the record
             processed = await self._process(raw, site, site_settings)
