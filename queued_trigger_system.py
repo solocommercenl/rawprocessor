@@ -11,6 +11,7 @@ from site_settings import SiteSettings
 from utils_filters import check_raw_against_filters
 from processing_queue import ProcessingQueue, ProcessingJob, JobType
 from jobqueue import WPQueue
+from voorraad_processor import VoorraadProcessor
 
 # Import the new robust site detection
 def extract_site_key(site_url: str) -> str:
@@ -131,7 +132,8 @@ class QueuedTriggerSystem:
             tasks = [
                 asyncio.create_task(self._watch_raw_collection()),
                 asyncio.create_task(self._watch_processed_collections()),
-                asyncio.create_task(self._watch_site_settings())
+                asyncio.create_task(self._watch_site_settings()),
+                asyncio.create_task(self._watch_voorraad_raw_collection())
             ]
             
             # Wait for all monitoring tasks
@@ -624,3 +626,38 @@ class QueuedTriggerSystem:
         except Exception as ex:
             logger.error(f"Error getting performance metrics: {ex}")
             return {"error": str(ex)}
+        
+    async def _watch_voorraad_raw_collection(self):
+        """
+        Watch voorraad_raw collection and trigger VoorraadProcessor.
+        """
+        logger.info("Starting voorraad_raw collection monitoring...")
+        
+        # We gebruiken de VoorraadProcessor die we eerder hebben geïmporteerd
+        voorraad_processor = VoorraadProcessor(self.db)
+
+        try:
+            # Luister naar alle wijzigingen in de voorraad_raw collectie
+            change_stream = self.db.voorraad_raw.watch(full_document="updateLookup")
+            
+            async for change in change_stream:
+                if not self.running:
+                    break
+                
+                document = change.get("fullDocument")
+                if not document:
+                    continue
+
+                site = document.get("site")
+                if site:
+                    logger.info(f"Detected voorraad_raw change for site '{site}', processing...")
+                    # Verwerk het record. De processor slaat het op in de juiste
+                    # processed_voorraad_{site} collectie.
+                    await voorraad_processor.process_single_record(document, site)
+
+        except Exception as ex:
+            logger.error(f"Error in voorraad_raw collection monitoring: {ex}")
+            # In een productieomgeving zou je hier misschien willen herstarten
+            if self.running:
+                await asyncio.sleep(5)
+                asyncio.create_task(self._watch_voorraad_raw_collection())

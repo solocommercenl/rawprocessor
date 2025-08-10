@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
-
+from jobqueue import WPQueue
 from site_settings import SiteSettings
 from utils import (
     calculate_hash_groups, normalize_gallery, extract_power_values,
@@ -25,6 +25,7 @@ class VoorraadProcessor:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.raw_collection = db["voorraad_raw"]
+        self.wp_queues: Dict[str, WPQueue] = {}
         
     async def process_by_site(self, site: str):
         """
@@ -311,22 +312,66 @@ class VoorraadProcessor:
                 "st_desired_remaining_debt": 0,
                 "st_monthly_payment": 0
             }
+        async def should_sync(self, processed_doc: dict) -> Tuple[bool, Dict[str, str], List[str]]:
+            """
+            Bepaalt of een verwerkt record gesynchroniseerd moet worden op basis van hash-vergelijking.
+            """
+            current_hashes = processed_doc.get("hashes", {})
+            processed_collection = self.db[f"processed_voorraad_{processed_doc['site']}"]
+            existing = await processed_collection.find_one({"st_ad_id": processed_doc["st_ad_id"]})
+            
+            if not existing:
+                # Nieuw record, synchroniseer alles
+                return True, current_hashes, list(current_hashes.keys())
+
+            # Vergelijk hashes om te zien wat er is veranderd
+            old_hashes = existing.get("hashes", {})
+            changed_groups = [
+                group for group in current_hashes 
+                if old_hashes.get(group) != current_hashes[group]
+            ]
+            
+            return bool(changed_groups), current_hashes, changed_groups
     
     async def _store_processed(self, processed: dict, processed_collection):
-        """Store or update processed record."""
+        """Store or update processed record AND queue for WordPress if changed."""
         
         try:
+            # Bepaal eerst of er een sync nodig is VOORDAT we de data opslaan
+            should_sync, hash_groups, changed_groups = await self.should_sync(processed)
+
+            # Sla het verwerkte record op (dit was de oorspronkelijke functie)
             result = await processed_collection.replace_one(
                 {"st_ad_id": processed["st_ad_id"]},
                 processed,
                 upsert=True
             )
             
+            # Als er wijzigingen zijn, maak dan een taak aan in de WP Queue
+            if should_sync:
+                site = processed.get("site")
+                if site not in self.wp_queues:
+                    # Gebruik dezelfde queue als de import-autos
+                    self.wp_queues[site] = WPQueue(self.db, site) 
+                
+                queue = self.wp_queues[site]
+                await queue.enqueue_job(
+                    action="create" if processed["_is_new"] else "update",
+                    ad_id=processed["st_ad_id"],
+                    post_id=processed.get("wp_post_id"),
+                    changed_fields=changed_groups,
+                    hash_groups=hash_groups,
+                    reason="voorraad_processed",
+                    # Dit is de cruciale toevoeging die het verschil maakt:
+                    meta={"source_type": "voorraad"}
+                )
+                logger.info(f"Queued WP job for voorraad car {processed['st_ad_id']} on site {site}")
+
             if result.upserted_id:
                 logger.debug(f"Inserted new record: {processed['st_ad_id']}")
             else:
                 logger.debug(f"Updated existing record: {processed['st_ad_id']}")
-                
+
         except Exception as ex:
-            logger.error(f"Error storing processed record {processed.get('st_ad_id')}: {ex}")
+            logger.error(f"Error storing/queueing processed voorraad record {processed.get('st_ad_id')}: {ex}")
             raise
