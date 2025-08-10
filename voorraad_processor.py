@@ -84,11 +84,16 @@ class VoorraadProcessor:
             
             # Calculate hash groups for change detection
             processed["hashes"] = calculate_hash_groups(processed)
+
+            # --- DIT IS DE TOEGEVOEGDE STAP ---
+            # Sla het resultaat op in de database en plaats een taak in de wachtrij
+            await self._store_processed(processed, processed_collection)
             
-            logger.debug(f"[voorraad_{site}] Successfully processed: {record_id}")
+            logger.debug(f"[voorraad_{site}] Successfully processed and stored: {record_id}")
             return processed
             
         except Exception as ex:
+            
             logger.error(f"[voorraad_{site}] Error processing {record_id}: {ex}")
             return None
     
