@@ -66,6 +66,8 @@ class VoorraadProcessor:
         """Process a single voorraad_raw record."""
         
         record_id = raw.get("car_id", "unknown")
+        # --- VOEG DEZE REGEL TOE ---
+        processed_collection = self.db[f"processed_voorraad_{site}"]
         
         try:
             # Get site settings if not provided
@@ -78,22 +80,19 @@ class VoorraadProcessor:
                 return None
             
             # Check if this is a new record
-            processed_collection = self.db[f"processed_voorraad_{site}"]
             existing = await processed_collection.find_one({"st_ad_id": processed["st_ad_id"]})
             processed["_is_new"] = not bool(existing)
             
             # Calculate hash groups for change detection
             processed["hashes"] = calculate_hash_groups(processed)
-
-            # --- DIT IS DE TOEGEVOEGDE STAP ---
-            # Sla het resultaat op in de database en plaats een taak in de wachtrij
+            
+            # --- DIT IS DE GECORRIGEERDE OPSLAGSTAP ---
             await self._store_processed(processed, processed_collection)
             
             logger.debug(f"[voorraad_{site}] Successfully processed and stored: {record_id}")
             return processed
             
         except Exception as ex:
-            
             logger.error(f"[voorraad_{site}] Error processing {record_id}: {ex}")
             return None
     
