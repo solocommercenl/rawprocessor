@@ -274,10 +274,11 @@ class QueuedTriggerSystem:
             car_id = document.get("car_id", "unknown")
             listing_status = document.get("listing_status", True)
             
-            # 🚨 FIX: Only process active listings, regardless of operation type
-            # This prevents inactive records from being processed and creating unwanted processed records
-            if not listing_status:
-                logger.debug(f"Skipping inactive listing: {car_id} (listing_status: {listing_status}) - no processing jobs created")
+            # Only process active listings or status changes
+            # This allows status changes to be processed (for RAW_STATUS_CHANGE jobs)
+            # while preventing new inactive records from being processed
+            if not listing_status and operation_type != "update":
+                logger.debug(f"Skipping inactive listing: {car_id} (not a status change)")
                 return
             
             logger.info(f"Evaluating raw {operation_type} for car_id={car_id}")
