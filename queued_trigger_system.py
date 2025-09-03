@@ -274,9 +274,10 @@ class QueuedTriggerSystem:
             car_id = document.get("car_id", "unknown")
             listing_status = document.get("listing_status", True)
             
-            # Only process active listings or status changes
-            if not listing_status and operation_type != "update":
-                logger.debug(f"Skipping inactive listing: {car_id}")
+            # 🚨 FIX: Only process active listings, regardless of operation type
+            # This prevents inactive records from being processed and creating unwanted processed records
+            if not listing_status:
+                logger.debug(f"Skipping inactive listing: {car_id} (listing_status: {listing_status}) - no processing jobs created")
                 return
             
             logger.info(f"Evaluating raw {operation_type} for car_id={car_id}")
@@ -322,6 +323,7 @@ class QueuedTriggerSystem:
         Handle processed collection changes - queue WordPress jobs.
         FIXED: Prevents infinite loops from wp_post_id tracking updates.
         FIXED: Ignores processed record deletions (final step - no WP action needed).
+        FIXED: Handles inactive records (im_status: False) by creating appropriate WP actions.
         """
         try:
             operation_type = change.get("operationType")
@@ -350,14 +352,37 @@ class QueuedTriggerSystem:
             if document:
                 ad_id = document.get("im_ad_id")
                 post_id = document.get("wp_post_id")  # If we track WP post IDs
+                im_status = document.get("im_status")
             else:
                 # For delete operations, we need to get ad_id from document key
                 ad_id = None  # We'll need to handle this case
                 post_id = None
+                im_status = None
             
             if not ad_id:
                 logger.warning(f"[{site}] Processed change event missing ad_id")
                 return
+            
+            # 🚨 FIX: Check if record is inactive - create appropriate WP action for inactive records
+            if im_status == "False" or im_status is False:
+                # For inactive records, we need to create a draft/unpublish job
+                # This handles cases where existing posts need to be unpublished
+                if post_id:
+                    # Record has a WordPress post ID - create unpublish job
+                    queue = self.wp_queues[site]
+                    await queue.enqueue_job(
+                        action="unpublish",
+                        ad_id=ad_id,
+                        post_id=post_id,
+                        changed_fields=["status"],
+                        hash_groups=document.get("hashes", {}),
+                        reason="processed_status_change"
+                    )
+                    logger.debug(f"[{site}] Queued unpublish WP job for inactive record (im_status: {im_status}) for ad_id={ad_id}")
+                else:
+                    # Record has no WordPress post ID - no action needed
+                    logger.debug(f"[{site}] Skipping inactive record without WP post ID (im_status: {im_status}) for ad_id={ad_id}")
+                return  # Exit early - job already created if needed
                 
             logger.info(f"[{site}] Queueing WP {operation_type} for ad_id={ad_id}")
             
@@ -657,7 +682,7 @@ class QueuedTriggerSystem:
 
         except Exception as ex:
             logger.error(f"Error in voorraad_raw collection monitoring: {ex}")
-            # In een productieomgeving zou je hier misschien willen herstarten
+            # FIXED: Don't recursively restart - just log and continue
+            # The main monitoring loop will handle restarting if needed
             if self.running:
-                await asyncio.sleep(5)
-                asyncio.create_task(self._watch_voorraad_raw_collection())
+                logger.warning("Voorraad monitoring encountered error, continuing...")
