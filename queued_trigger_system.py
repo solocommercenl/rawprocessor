@@ -340,7 +340,7 @@ class QueuedTriggerSystem:
                 updated_fields = set(update_desc.get("updatedFields", {}).keys())
                 
                 # If only WordPress tracking fields were updated, skip job creation
-                wp_tracking_fields = {"wp_post_id", "wp_updated_at"}
+                wp_tracking_fields = {"wp_post_id", "wp_updated_at", "_is_new"}
                 if updated_fields and updated_fields.issubset(wp_tracking_fields):
                     logger.debug(f"[{site}] Skipping WP tracking update - no job created")
                     return  # Exit early - NO JOB CREATED
