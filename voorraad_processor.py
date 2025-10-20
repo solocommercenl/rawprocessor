@@ -107,7 +107,7 @@ class VoorraadProcessor:
         
         # Basisdata
         doc["st_price"] = float(raw.get("price", 0))
-        doc["st_mileage"] = int(raw.get("milage", 0) or raw.get("mileage", 0))
+        doc["st_mileage"] = int(raw.get("milage", 0) or raw.get("mileage", 0) or 0)
         doc["st_first_registration"] = raw.get("registration", "")
         doc["st_registration_year"] = int(raw.get("registration_year", 0) or 0)
         
@@ -124,7 +124,7 @@ class VoorraadProcessor:
         doc["st_fuel_type"] = await self._translate_field(raw.get("energyconsumption", {}).get("Fueltype", ""), "fuel_type")
         
         vehicle_history = raw.get("vehiclehistory", {})
-        doc["st_previousowner"] = str(vehicle_history.get("Previousowner", ""))
+        doc["st_previousowner"] = str(vehicle_history.get("Previousowner", 0) or 0)
 
         emissions_data = raw.get("energyconsumption", {})
         emissions_str = emissions_data.get("emissions", "")
@@ -138,9 +138,9 @@ class VoorraadProcessor:
                 doc["st_emissions"] = ""
 
         # Overige velden
-        doc["st_doors"] = str(raw.get("Basicdata", {}).get("Doors", ""))
+        doc["st_doors"] = str(raw.get("Basicdata", {}).get("Doors", 0) or 0)
         doc["st_seats"] = int(raw.get("Basicdata", {}).get("Seats", 0) or 0)
-        doc["st_cylinders"] = str(raw.get("TechnicalData", {}).get("Cylinders", ""))
+        doc["st_cylinders"] = str(raw.get("TechnicalData", {}).get("Cylinders", 0) or 0)
         doc["st_cylinder_capacity"] = extract_numeric_value(raw.get("TechnicalData", {}).get("Enginesize", ""))
         doc["st_raw_emissions"] = raw.get("energyconsumption", {}).get("raw_emissions")
         doc["st_fullservicehistory"] = "Ja" if raw.get("vehiclehistory", {}).get("Fullservicehistory", False) else "Nee"
