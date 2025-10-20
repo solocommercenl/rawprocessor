@@ -228,7 +228,9 @@ class VoorraadProcessor:
             if should_sync:
                 site = processed.get("site")
                 if site not in self.wp_queues:
-                    self.wp_queues[site] = WPQueue(self.db, site)
+                    self.wp_queues[site] = WPQueue(self.db, site, queue_prefix="wp_voorraad")
+    
+                queue = self.wp_queues[site]
                 
                 queue = self.wp_queues[site]
                 await queue.enqueue_job(

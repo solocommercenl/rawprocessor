@@ -18,10 +18,10 @@ QUEUE_ACTIONS = {"create", "update", "unpublish", "delete"}
 RETRY_LIMIT_DEFAULT = 3
 
 class WPQueue:
-    def __init__(self, db: AsyncIOMotorDatabase, site: str, retry_limit: int = RETRY_LIMIT_DEFAULT):
+    def __init__(self, db: AsyncIOMotorDatabase, site: str, queue_prefix: str = "wp_sync", retry_limit: int = RETRY_LIMIT_DEFAULT):
         self.db = db
         self.site = site
-        self.collection = db[f"wp_sync_queue_{site}"]
+        self.collection = db[f"{queue_prefix}_queue_{site}"]
         self.retry_limit = retry_limit
 
     async def enqueue_job(
