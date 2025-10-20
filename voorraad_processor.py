@@ -96,6 +96,10 @@ class VoorraadProcessor:
         doc["st_mongo_id"] = str(raw.get("_id", ""))
         doc["st_title"] = f"{raw.get('brand', '')} {raw.get('model', '')} {raw.get('title', '')}".strip()
         
+        original_make = raw.get("brand", "")
+        original_model = raw.get("model", "")
+        doc["st_make_model"] = f"{original_make} {original_model}".strip()
+
         # Gallery
         images = normalize_gallery(raw.get("Images", []))
         doc["st_gallery"] = images
@@ -119,6 +123,20 @@ class VoorraadProcessor:
         doc["st_drivetrain"] = await self._translate_field(raw.get("Basicdata", {}).get("Drivetrain", ""), "drivetrain")
         doc["st_fuel_type"] = await self._translate_field(raw.get("energyconsumption", {}).get("Fueltype", ""), "fuel_type")
         
+        vehicle_history = raw.get("vehiclehistory", {})
+        doc["st_previousowner"] = str(vehicle_history.get("Previousowner", ""))
+
+        emissions_data = raw.get("energyconsumption", {})
+        emissions_str = emissions_data.get("emissions", "")
+        if emissions_str:
+            doc["st_emissions"] = emissions_str
+        else:
+            raw_emissions = emissions_data.get("raw_emissions")
+            if raw_emissions:
+                doc["st_emissions"] = f"{raw_emissions}gram comb"
+            else:
+                doc["st_emissions"] = ""
+
         # Overige velden
         doc["st_doors"] = str(raw.get("Basicdata", {}).get("Doors", ""))
         doc["st_seats"] = int(raw.get("Basicdata", {}).get("Seats", 0) or 0)
@@ -128,6 +146,10 @@ class VoorraadProcessor:
         doc["st_fullservicehistory"] = "Ja" if raw.get("vehiclehistory", {}).get("Fullservicehistory", False) else "Nee"
         doc["st_vat_deductible"] = "BTW auto" if bool(raw.get("vatded", False)) else "Marge auto"
         doc["st_vat_filter"] = "btw" if bool(raw.get("vatded", False)) else "marge"
+
+        colour_data = raw.get("colourandupholstery", {})
+        doc["st_manufacturer_color"] = colour_data.get("Manufacturercolour", "")
+        doc["st_upholstery"] = colour_data.get("Upholstery", "")
 
         # Equipment/features
         equipment = raw.get("Equipment", {})
