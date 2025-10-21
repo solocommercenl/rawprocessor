@@ -85,9 +85,8 @@ def extract_power_values(power_str: str) -> Tuple[Optional[int], Optional[int]]:
 # --- Extract Numeric Values ---
 def extract_numeric_value(value_str: str) -> Optional[int]:
     """
-    Extract numeric value from strings like "1,305 kg", "1,199 cc", "8,333 km"
-    FIXED: Better handling of European number format with commas as thousands separator
-    Returns integer (rounded, no decimals) as requested.
+    Extract numeric value from strings like "1.499 cm³", "1,305 kg", "8,333 km"
+    Handles both European (dot as thousands) and US (comma as thousands) formats
     """
     if not value_str:
         return None
@@ -96,26 +95,37 @@ def extract_numeric_value(value_str: str) -> Optional[int]:
         # Convert to string and clean
         clean_str = str(value_str).strip()
         
-        # Remove common units (kg, cc, km, etc.)
-        clean_str = re.sub(r'\s*(kg|cc|km|g|l|hp|kw|mph|kmh|lbs|tons?)\b', '', clean_str, flags=re.IGNORECASE)
+        # Remove common units
+        clean_str = re.sub(r'\s*(kg|cc|cm³|cm3|km|g|l|hp|kw|mph|kmh|lbs|tons?)\b', '', clean_str, flags=re.IGNORECASE)
         
         # Remove any remaining non-digit characters except comma, dot, and minus
         clean_str = re.sub(r'[^\d,.-]', '', clean_str)
         
-        # Handle European format: "1,305" (comma as thousands separator)
-        # vs decimal format: "1.305" (dot as decimal separator)
+        # Determine format and normalize
         if ',' in clean_str and '.' in clean_str:
-            # Both comma and dot present - assume European format: "1,305.50"
-            # Remove commas (thousands separator), keep dot (decimal)
-            clean_str = clean_str.replace(',', '')
-        elif ',' in clean_str and '.' not in clean_str:
-            # Only comma present - check if it's thousands separator or decimal
+            # Both present - determine which is thousands separator
+            # "1,234.56" (US) vs "1.234,56" (EU)
+            if clean_str.rindex(',') > clean_str.rindex('.'):
+                # Comma comes after dot: European format "1.234,56"
+                clean_str = clean_str.replace('.', '').replace(',', '.')
+            else:
+                # Dot comes after comma: US format "1,234.56"
+                clean_str = clean_str.replace(',', '')
+        elif '.' in clean_str:
+            # Only dot present - check if it's thousands separator
+            parts = clean_str.split('.')
+            if len(parts) == 2 and len(parts[1]) == 3:
+                # Looks like thousands separator: "1.465" -> "1465"
+                clean_str = clean_str.replace('.', '')
+            # Otherwise keep dot as decimal separator
+        elif ',' in clean_str:
+            # Only comma present - check if it's thousands separator
             parts = clean_str.split(',')
             if len(parts) == 2 and len(parts[1]) == 3:
-                # Likely thousands separator: "1,305"
+                # Looks like thousands separator: "1,465" -> "1465"
                 clean_str = clean_str.replace(',', '')
             else:
-                # Likely decimal separator: "1,5" -> "1.5"
+                # Comma as decimal separator: "1,5" -> "1.5"
                 clean_str = clean_str.replace(',', '.')
         
         # Convert to float then round to integer
