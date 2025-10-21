@@ -89,7 +89,7 @@ class VoorraadProcessor:
     async def _process(self, raw: dict, site: str, site_settings: dict) -> Optional[dict]:
         """Build the processed document with translations and calculations."""
         doc: Dict[str, Any] = {}
-        
+        technical_data = raw.get("TechnicalData", {})
         # Core identifiers en title
         doc["st_ad_id"] = raw.get("car_id", "")
         doc["st_url"] = raw.get("Product_URL", "")
