@@ -167,12 +167,11 @@ class Processor:
         doc["im_doors"] = str(basicdata.get("Doors", ""))
         doc["im_drivetrain"] = basicdata.get("Drivetrain", "") or ""
         
-        # Extract numeric values from formatted strings
         empty_weight = extract_numeric_value(technical_data.get("Emptyweight", ""))
-        doc["im_empty_weight"] = str(int(empty_weight)) if empty_weight else ""
-        
+        doc["im_empty_weight"] = str(int(empty_weight)) if empty_weight else "0"
+
         engine_size = extract_numeric_value(technical_data.get("Enginesize", ""))
-        doc["im_engine_size"] = str(int(engine_size)) if engine_size else ""
+        doc["im_engine_size"] = str(int(engine_size)) if engine_size else "0"
         
         # Emissions formatting
         emissions_data = raw.get("energyconsumption", {})

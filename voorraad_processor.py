@@ -158,12 +158,11 @@ class VoorraadProcessor:
         doc["st_safety_security"] = await self._translate_equipment(equipment.get("safetyAndSecurity", []), "safety_security")
         doc["st_extras"] = await self._translate_equipment(equipment.get("extras", []), "extras")
         
-        engine_size = extract_numeric_value(raw.get("TechnicalData", {}).get("Enginesize", ""))
-        doc["st_engine_size"] = engine_size if engine_size else 0
-
-        technical_data = raw.get("TechnicalData", {})
         empty_weight = extract_numeric_value(technical_data.get("Emptyweight", ""))
-        doc["st_empty_weight"] = empty_weight if empty_weight else 0
+        doc["st_empty_weight"] = str(int(empty_weight)) if empty_weight else "0"
+
+        engine_size = extract_numeric_value(technical_data.get("Enginesize", ""))
+        doc["st_engine_size"] = str(int(engine_size)) if engine_size else "0"
 
 
         # Taxonomieën voor WordPress
