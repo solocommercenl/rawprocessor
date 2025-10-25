@@ -18,6 +18,7 @@ from utils import (
     calculate_hash_groups, normalize_gallery, extract_power_values,
     extract_numeric_value
 )
+from translator import Translator
 
 class VoorraadProcessor:
     """Processor for voorraad cars with simplified calculations."""
@@ -26,6 +27,7 @@ class VoorraadProcessor:
         self.db = db
         self.raw_collection = db["voorraad_raw"]
         self.wp_queues: Dict[str, WPQueue] = {}
+        self.translator = Translator(db)
         
     async def process_by_site(self, site: str):
         """
@@ -166,8 +168,17 @@ class VoorraadProcessor:
 
 
         # Taxonomieën voor WordPress
-        doc["make"] = raw.get("brand", "")
-        doc["model"] = raw.get("model", "")
+        brand = raw.get("brand", "")
+        model = raw.get("model", "")
+
+        doc["make"] = brand
+        # Consolidate model using same logic as import cars
+        if brand and model:
+            consolidated_model = await self.translator.consolidate_model(brand, model)
+            doc["model"] = consolidated_model
+        else:
+            doc["model"] = model
+            
         doc["color"] = await self._translate_field(raw.get("colourandupholstery", {}).get("Colour", ""), "color")
         
         # Status en timestamps
