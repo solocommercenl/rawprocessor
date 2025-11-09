@@ -1,12 +1,13 @@
-"""
-cleaner.py
+# cleaner.py
 
+"""
 Enhanced periodic database cleaner for rawprocessor.
 Runs based on configured interval to delete invalid records from raw collection.
 This is a true preprocessor that maintains database cleanliness.
 
 UPDATED: Enhanced with complete data quality logic matching utils_filters.py
 UPDATED: Added inactive record cleanup for listing_status: false records
+UPDATED: Added Bunny CDN directory deletion when removing inactive records
 Logic Flow: Record → Check Images (≥4) → Check Emissions Validity → Check Emissions Cap → Pass/Reject
 """
 
@@ -14,8 +15,16 @@ from typing import Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from loguru import logger
 from datetime import datetime, timedelta, timezone
+import requests
+import re
 
 from config import config
+
+# Bunny Storage credentials
+BUNNY_STORAGE_ZONE = "autodex"
+BUNNY_STORAGE_KEY = "d7e01336-b433-42b4-892a75ba380c-dd37-4c3c"
+BUNNY_STORAGE_URL = "https://storage.bunnycdn.com"
+
 
 class Cleaner:
     """
@@ -32,9 +41,42 @@ class Cleaner:
         self.db = db
         self.min_images_required = config.MIN_IMAGES_REQUIRED
         self.emissions_threshold = config.EMISSIONS_ZERO_THRESHOLD
-        self.emissions_cap = 500  # Maximum allowed emissions
+        self.emissions_cap = 500
         
         logger.info(f"Enhanced Cleaner initialized with config: min_images={self.min_images_required}, emissions_threshold={self.emissions_threshold}, emissions_cap={self.emissions_cap}")
+
+    def delete_bunny_directory(self, car_id: str) -> bool:
+        """
+        Delete entire directory for a car_id from Bunny CDN.
+        
+        :param car_id: The car_id (directory name) to delete
+        :return: True if successful, False otherwise
+        """
+        try:
+            delete_url = f"{BUNNY_STORAGE_URL}/{BUNNY_STORAGE_ZONE}/{car_id}/"
+            
+            response = requests.delete(
+                delete_url,
+                headers={"AccessKey": BUNNY_STORAGE_KEY},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                logger.debug(f"Deleted Bunny CDN directory: {car_id}")
+                return True
+            elif response.status_code == 404:
+                logger.debug(f"Bunny CDN directory not found (already deleted?): {car_id}")
+                return True
+            else:
+                logger.warning(f"Failed to delete Bunny CDN directory {car_id}: HTTP {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout deleting Bunny CDN directory: {car_id}")
+            return False
+        except Exception as ex:
+            logger.error(f"Error deleting Bunny CDN directory {car_id}: {ex}")
+            return False
 
     async def cleanup_raw_collection(self) -> Dict[str, Any]:
         """
@@ -45,7 +87,7 @@ class Cleaner:
         Quality Rules:
         1. Images: >= configured minimum images required
         2. Emissions Validity: Missing emissions only allowed for pure electric cars
-        3. Emissions Cap: No car can have > 500g emissions (data quality check)  
+        3. Emissions Cap: No car can have > 500g emissions (data quality check)
         4. Zero Emissions: If emissions = 0, fuel type must be Electric
         
         :return: Dictionary with cleanup statistics
@@ -73,22 +115,19 @@ class Cleaner:
         }
         
         try:
-            # Count total records before cleanup
             stats["total_before"] = await self.db.raw.count_documents({})
             logger.info(f"Raw collection has {stats['total_before']} records before cleanup")
             
-            # Get list of car_ids that are currently being processed to exclude them
             processing_car_ids = await self._get_processing_car_ids()
             stats["skipped_processing"] = len(processing_car_ids)
             logger.info(f"Found {stats['skipped_processing']} records currently being processed - will skip these")
             
-            # === STEP 1: Delete records with insufficient images ===
+            # STEP 1: Delete records with insufficient images
             logger.info(f"Deleting records with < {self.min_images_required} images...")
             delete_query_images = {
                 "$expr": {"$lt": [{"$size": {"$ifNull": ["$Images", []]}}, self.min_images_required]}
             }
             
-            # Add exclusion for records being processed
             if processing_car_ids:
                 delete_query_images["car_id"] = {"$nin": processing_car_ids}
             
@@ -96,7 +135,7 @@ class Cleaner:
             stats["deleted_insufficient_images"] = result_images.deleted_count
             logger.info(f"Deleted {stats['deleted_insufficient_images']} records with < {self.min_images_required} images")
             
-            # === STEP 2: Delete records with missing emissions (non-pure-electric) ===
+            # STEP 2: Delete records with missing emissions (non-pure-electric)
             logger.info("Deleting non-pure-electric records with missing emissions...")
             delete_query_missing_emissions = {
                 "energyconsumption.raw_emissions": None,
@@ -113,7 +152,6 @@ class Cleaner:
                 ]
             }
             
-            # Add exclusion for records being processed
             if processing_car_ids:
                 delete_query_missing_emissions["car_id"] = {"$nin": processing_car_ids}
             
@@ -121,13 +159,12 @@ class Cleaner:
             stats["deleted_missing_emissions"] = result_missing_emissions.deleted_count
             logger.info(f"Deleted {stats['deleted_missing_emissions']} non-pure-electric records with missing emissions")
             
-            # === STEP 3: Delete records with emissions > 500g ===
+            # STEP 3: Delete records with emissions > 500g
             logger.info("Deleting records with emissions > 500g...")
             delete_query_high_emissions = {
                 "energyconsumption.raw_emissions": {"$gt": self.emissions_cap}
             }
             
-            # Add exclusion for records being processed
             if processing_car_ids:
                 delete_query_high_emissions["car_id"] = {"$nin": processing_car_ids}
             
@@ -135,7 +172,7 @@ class Cleaner:
             stats["deleted_emissions_too_high"] = result_high_emissions.deleted_count
             logger.info(f"Deleted {stats['deleted_emissions_too_high']} records with emissions > {self.emissions_cap}g")
             
-            # === STEP 4: Delete records with emissions = 0 but not electric ===
+            # STEP 4: Delete records with emissions = 0 but not electric
             logger.info(f"Deleting records with emissions = {self.emissions_threshold} and not electric...")
             delete_query_invalid_zero = {
                 "energyconsumption.raw_emissions": self.emissions_threshold,
@@ -145,7 +182,6 @@ class Cleaner:
                 ]
             }
             
-            # Add exclusion for records being processed
             if processing_car_ids:
                 delete_query_invalid_zero["car_id"] = {"$nin": processing_car_ids}
             
@@ -153,17 +189,15 @@ class Cleaner:
             stats["deleted_invalid_zero_emissions"] = result_invalid_zero.deleted_count
             logger.info(f"Deleted {stats['deleted_invalid_zero_emissions']} records with invalid zero emissions")
             
-            # === STEP 5: Delete records with invalid emissions values ===
+            # STEP 5: Delete records with invalid emissions values
             logger.info("Deleting records with invalid emissions values...")
-            # This is harder to do in MongoDB, but we can catch obvious string values
             delete_query_invalid_emissions = {
                 "$or": [
                     {"energyconsumption.raw_emissions": {"$type": "string"}},
-                    {"energyconsumption.raw_emissions": {"$lt": 0}}  # Negative emissions
+                    {"energyconsumption.raw_emissions": {"$lt": 0}}
                 ]
             }
             
-            # Add exclusion for records being processed
             if processing_car_ids:
                 delete_query_invalid_emissions["car_id"] = {"$nin": processing_car_ids}
             
@@ -171,7 +205,6 @@ class Cleaner:
             stats["deleted_invalid_emissions_value"] = result_invalid_emissions.deleted_count
             logger.info(f"Deleted {stats['deleted_invalid_emissions_value']} records with invalid emissions values")
             
-            # Calculate final statistics
             stats["total_deleted"] = (
                 stats["deleted_insufficient_images"] + 
                 stats["deleted_missing_emissions"] + 
@@ -206,6 +239,7 @@ class Cleaner:
     async def cleanup_inactive_records(self) -> Dict[str, Any]:
         """
         Clean up inactive records (listing_status: false) from raw and processed collections.
+        Deletes Bunny CDN directories for removed cars.
         Only deletes records that have no pending unpublish jobs and have been inactive for at least 5 minutes.
         
         :return: Dictionary with cleanup statistics
@@ -220,6 +254,8 @@ class Cleaner:
             "records_too_recent": 0,
             "deleted_from_raw": 0,
             "deleted_from_processed": 0,
+            "bunny_directories_deleted": 0,
+            "bunny_deletion_failures": 0,
             "total_processed_collections_checked": 0,
             "duration_seconds": 0,
             "config_used": {
@@ -228,11 +264,9 @@ class Cleaner:
         }
         
         try:
-            # Get safety delay from config
             safety_delay = timedelta(minutes=config.INACTIVE_CLEANUP_DELAY_MINUTES)
             cutoff_time = datetime.utcnow().replace(tzinfo=timezone.utc) - safety_delay
             
-            # Find all inactive records
             inactive_records = []
             async for record in self.db.raw.find({"listing_status": False}):
                 stats["inactive_records_found"] += 1
@@ -243,7 +277,6 @@ class Cleaner:
                 if not car_id:
                     continue
                     
-                # Check if record has been inactive long enough
                 if updated_at > cutoff_time:
                     stats["records_too_recent"] += 1
                     logger.debug(f"Skipping {car_id} - too recent ({updated_at})")
@@ -260,13 +293,10 @@ class Cleaner:
                 stats["duration_seconds"] = (datetime.utcnow() - start_time).total_seconds()
                 return stats
             
-            # Get list of active sites
             active_sites = []
             async for site_doc in self.db.site_settings.find({}):
                 site_url = site_doc.get("site_url", "")
                 if site_url:
-                    # Extract site key from site_url (same logic as in queued_trigger_system)
-                    import re
                     clean_url = site_url.lower().strip()
                     clean_url = re.sub(r'^https?://', '', clean_url)
                     clean_url = re.sub(r'^www\.', '', clean_url)
@@ -286,14 +316,12 @@ class Cleaner:
             
             logger.info(f"Found {len(active_sites)} active sites: {active_sites}")
             
-            # Check each inactive record for pending unpublish jobs
             records_to_delete = []
             
             for record in inactive_records:
                 car_id = record["car_id"]
                 has_pending_jobs = False
                 
-                # Check all site WP queues for pending unpublish jobs
                 for site in active_sites:
                     queue_collection = f"wp_sync_queue_{site}"
                     
@@ -311,7 +339,6 @@ class Cleaner:
                             
                     except Exception as ex:
                         logger.warning(f"Could not check queue {queue_collection} for {car_id}: {ex}")
-                        # If we can't check, assume there might be pending jobs to be safe
                         has_pending_jobs = True
                         break
                 
@@ -323,13 +350,21 @@ class Cleaner:
             
             logger.info(f"Ready to delete {len(records_to_delete)} inactive records (no pending jobs)")
             
-            # Delete records from raw collection
             if records_to_delete:
                 raw_result = await self.db.raw.delete_many({"car_id": {"$in": records_to_delete}})
                 stats["deleted_from_raw"] = raw_result.deleted_count
                 logger.info(f"Deleted {stats['deleted_from_raw']} inactive records from raw collection")
                 
-                # Delete from all processed collections
+                # Delete Bunny CDN directories for deleted records
+                logger.info(f"Cleaning up Bunny CDN directories for {len(records_to_delete)} records...")
+                for car_id in records_to_delete:
+                    if self.delete_bunny_directory(car_id):
+                        stats["bunny_directories_deleted"] += 1
+                    else:
+                        stats["bunny_deletion_failures"] += 1
+                
+                logger.info(f"Bunny CDN cleanup: {stats['bunny_directories_deleted']} deleted, {stats['bunny_deletion_failures']} failures")
+                
                 for site in active_sites:
                     processed_collection = f"processed_{site}"
                     
@@ -347,7 +382,6 @@ class Cleaner:
                     except Exception as ex:
                         logger.warning(f"Could not delete from {processed_collection}: {ex}")
             
-            # Calculate final statistics
             end_time = datetime.utcnow()
             stats["duration_seconds"] = (end_time - start_time).total_seconds()
             
@@ -357,6 +391,8 @@ class Cleaner:
             logger.info(f"  - Skipped (too recent): {stats['records_too_recent']}")
             logger.info(f"  - Deleted from raw: {stats['deleted_from_raw']}")
             logger.info(f"  - Deleted from processed: {stats['deleted_from_processed']}")
+            logger.info(f"  - Bunny CDN deleted: {stats['bunny_directories_deleted']}")
+            logger.info(f"  - Bunny CDN failures: {stats['bunny_deletion_failures']}")
             logger.info(f"  - Duration: {stats['duration_seconds']:.2f} seconds")
             
             return stats
@@ -375,7 +411,6 @@ class Cleaner:
         :return: List of car_ids that should not be deleted
         """
         try:
-            # Get all pending and processing jobs from the processing queue
             cursor = self.db.processing_queue.find(
                 {"status": {"$in": ["pending", "processing"]}},
                 {"payload.car_id": 1}
@@ -388,12 +423,10 @@ class Cleaner:
                 if car_id:
                     car_ids.append(car_id)
             
-            # Remove duplicates
             return list(set(car_ids))
             
         except Exception as ex:
             logger.error(f"Error getting processing car_ids: {ex}")
-            # Return empty list to be safe - this will prevent cleanup but avoid race conditions
             return []
 
     async def get_cleanup_candidates_count(self) -> Dict[str, int]:
@@ -405,10 +438,9 @@ class Cleaner:
         :return: Dictionary with counts of records that would be deleted
         """
         try:
-            # Get processing car_ids to exclude them from counts
             processing_car_ids = await self._get_processing_car_ids()
             
-            # === STEP 1: Count insufficient images ===
+            # Count insufficient images
             images_query = {
                 "$expr": {"$lt": [{"$size": {"$ifNull": ["$Images", []]}}, self.min_images_required]}
             }
@@ -417,7 +449,7 @@ class Cleaner:
             
             images_count = await self.db.raw.count_documents(images_query)
             
-            # === STEP 2: Count missing emissions (non-pure-electric) ===
+            # Count missing emissions (non-pure-electric)
             missing_emissions_query = {
                 "energyconsumption.raw_emissions": None,
                 "$and": [
@@ -437,7 +469,7 @@ class Cleaner:
             
             missing_emissions_count = await self.db.raw.count_documents(missing_emissions_query)
             
-            # === STEP 3: Count high emissions (> 500g) ===
+            # Count high emissions (> 500g)
             high_emissions_query = {
                 "energyconsumption.raw_emissions": {"$gt": self.emissions_cap}
             }
@@ -446,7 +478,7 @@ class Cleaner:
             
             high_emissions_count = await self.db.raw.count_documents(high_emissions_query)
             
-            # === STEP 4: Count invalid zero emissions ===
+            # Count invalid zero emissions
             invalid_zero_query = {
                 "energyconsumption.raw_emissions": self.emissions_threshold,
                 "$and": [
@@ -459,11 +491,11 @@ class Cleaner:
             
             invalid_zero_count = await self.db.raw.count_documents(invalid_zero_query)
             
-            # === STEP 5: Count invalid emissions values ===
+            # Count invalid emissions values
             invalid_emissions_query = {
                 "$or": [
                     {"energyconsumption.raw_emissions": {"$type": "string"}},
-                    {"energyconsumption.raw_emissions": {"$lt": 0}}  # Negative emissions
+                    {"energyconsumption.raw_emissions": {"$lt": 0}}
                 ]
             }
             if processing_car_ids:
@@ -471,7 +503,7 @@ class Cleaner:
             
             invalid_emissions_count = await self.db.raw.count_documents(invalid_emissions_query)
             
-            # === STEP 6: Count inactive records ===
+            # Count inactive records
             safety_delay = timedelta(minutes=config.INACTIVE_CLEANUP_DELAY_MINUTES)
             cutoff_time = datetime.utcnow() - safety_delay
             
@@ -536,25 +568,21 @@ class Cleaner:
         issues = []
         warnings = []
         
-        # Check minimum images requirement
         if self.min_images_required < 1:
             issues.append(f"MIN_IMAGES_REQUIRED ({self.min_images_required}) must be at least 1")
         elif self.min_images_required > 10:
             warnings.append(f"MIN_IMAGES_REQUIRED ({self.min_images_required}) is quite high - many records may be deleted")
         
-        # Check emissions threshold
         if self.emissions_threshold < 0:
             issues.append(f"EMISSIONS_ZERO_THRESHOLD ({self.emissions_threshold}) cannot be negative")
         elif self.emissions_threshold > 50:
             warnings.append(f"EMISSIONS_ZERO_THRESHOLD ({self.emissions_threshold}) is high - may affect valid records")
         
-        # Check emissions cap
         if self.emissions_cap < 100:
             warnings.append(f"EMISSIONS_CAP ({self.emissions_cap}) is very low - may delete valid high-performance cars")
         elif self.emissions_cap > 1000:
             warnings.append(f"EMISSIONS_CAP ({self.emissions_cap}) is very high - may not catch data quality issues")
         
-        # Check inactive cleanup delay
         if hasattr(config, 'INACTIVE_CLEANUP_DELAY_MINUTES'):
             if config.INACTIVE_CLEANUP_DELAY_MINUTES < 1:
                 warnings.append(f"INACTIVE_CLEANUP_DELAY_MINUTES ({config.INACTIVE_CLEANUP_DELAY_MINUTES}) is very short")
@@ -586,10 +614,8 @@ class Cleaner:
             
             candidates = await self.get_cleanup_candidates_count()
             
-            # Calculate quality percentages
             quality_pass_rate = ((total_records - candidates["total_candidates"]) / total_records * 100) if total_records > 0 else 0
             
-            # Get fuel type distribution for context
             fuel_type_pipeline = [
                 {"$group": {"_id": "$energyconsumption.Fueltype", "count": {"$sum": 1}}},
                 {"$sort": {"count": -1}}

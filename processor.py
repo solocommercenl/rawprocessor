@@ -103,7 +103,7 @@ class Processor:
             financials = await self.calculator.calculate_financials(raw, vated)
 
             # Step 3: Build the processed document matching your target structure
-            doc = await self._build_processed_document(raw, translated, financials)
+            doc = await self._build_processed_document(raw, translated, financials, site_settings)
             
             # Step 4: Check if this is a new record
             existing = await self.processed_collection.find_one({"im_ad_id": doc["im_ad_id"]})
@@ -119,7 +119,7 @@ class Processor:
             logger.error(f"[{self.site}] Error processing record {record_id}: {ex}")
             return None
 
-    async def _build_processed_document(self, raw: dict, translated: dict, financials: dict) -> dict:
+    async def _build_processed_document(self, raw: dict, translated: dict, financials: dict, site_settings: dict) -> dict:
         """
         Build the complete processed document matching the target structure.
         JetEngine CLI expects arrays for both checkboxes AND gallery fields.
@@ -138,7 +138,8 @@ class Processor:
         doc["im_title"] = f"{original_make} {original_model} {title_suffix}".strip()
         
         # === GALLERY AND FEATURED IMAGE ===
-        images = normalize_gallery(raw.get("Images", []))
+        cdn_url = site_settings.get("cdn_url", "")
+        images = normalize_gallery(raw.get("Images", []), cdn_url)
         doc["im_gallery"] = images  # Keep as array for JetEngine
         doc["im_featured_image"] = images[0] if images else ""
         

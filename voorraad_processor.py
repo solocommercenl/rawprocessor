@@ -103,7 +103,8 @@ class VoorraadProcessor:
         doc["st_make_model"] = f"{original_make} {original_model}".strip()
 
         # Gallery
-        images = normalize_gallery(raw.get("Images", []))
+        cdn_url = site_settings.get("cdn_url", "")
+        images = normalize_gallery(raw.get("Images", []), cdn_url)
         doc["st_gallery"] = images
         doc["st_featured_image"] = images[0] if images else ""
         

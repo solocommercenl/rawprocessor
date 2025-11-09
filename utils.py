@@ -286,24 +286,16 @@ async def get_diesel_surcharge(db: AsyncIOMotorDatabase, reg_year: int) -> Optio
         return None
 
 # --- Normalize Gallery ---
-def normalize_gallery(images: Union[str, List[str]]) -> List[str]:
-    """
-    Normalize the gallery by converting various image formats into a list of URLs.
-    Handles both string and list inputs with various separators.
-    """
-    if isinstance(images, list):
-        return [url.strip() for url in images if url and url.strip()]
+def normalize_gallery(images: List[str], cdn_url: str = "") -> List[str]:
+    """Construct full CDN URLs from relative paths."""
+    if not images:
+        return []
     
-    if isinstance(images, str) and images.strip():
-        # Try different separators
-        if "|" in images:
-            return [url.strip() for url in images.split("|") if url.strip()]
-        elif "," in images:
-            return [url.strip() for url in images.split(",") if url.strip()]
-        else:
-            return [images.strip()]
+    # Use fallback CDN if not provided
+    if not cdn_url:
+        cdn_url = "images.autodex.nl"
     
-    return []
+    return [f"https://{cdn_url}{path}" for path in images]
 
 # --- Collection Name Helpers ---
 def get_processed_collection_name(site: str) -> str:
