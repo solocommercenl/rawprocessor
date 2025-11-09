@@ -351,11 +351,7 @@ class Cleaner:
             logger.info(f"Ready to delete {len(records_to_delete)} inactive records (no pending jobs)")
             
             if records_to_delete:
-                raw_result = await self.db.raw.delete_many({"car_id": {"$in": records_to_delete}})
-                stats["deleted_from_raw"] = raw_result.deleted_count
-                logger.info(f"Deleted {stats['deleted_from_raw']} inactive records from raw collection")
-                
-                # Delete Bunny CDN directories for deleted records
+                # STEP 1: Delete Bunny CDN directories FIRST
                 logger.info(f"Cleaning up Bunny CDN directories for {len(records_to_delete)} records...")
                 for car_id in records_to_delete:
                     if self.delete_bunny_directory(car_id):
@@ -365,6 +361,7 @@ class Cleaner:
                 
                 logger.info(f"Bunny CDN cleanup: {stats['bunny_directories_deleted']} deleted, {stats['bunny_deletion_failures']} failures")
                 
+                # STEP 2: Delete from processed collections
                 for site in active_sites:
                     processed_collection = f"processed_{site}"
                     
@@ -381,6 +378,11 @@ class Cleaner:
                         
                     except Exception as ex:
                         logger.warning(f"Could not delete from {processed_collection}: {ex}")
+                
+                # STEP 3: Delete from raw collection LAST (after Bunny and processed cleanup)
+                raw_result = await self.db.raw.delete_many({"car_id": {"$in": records_to_delete}})
+                stats["deleted_from_raw"] = raw_result.deleted_count
+                logger.info(f"Deleted {stats['deleted_from_raw']} inactive records from raw collection")
             
             end_time = datetime.utcnow()
             stats["duration_seconds"] = (end_time - start_time).total_seconds()
