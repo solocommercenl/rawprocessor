@@ -55,8 +55,15 @@ async def process_record(doc, collection, raw_collection, cdn_url, stats):
             raw_doc = await raw_collection.find_one({"car_id": ad_id})
             
             if not raw_doc:
-                logger.warning(f"No raw record found for {ad_id}")
-                stats['skipped_no_raw'] += 1
+                logger.warning(f"No raw record found for {ad_id} - marking as inactive")
+                
+                # Mark as inactive so it gets drafted/removed
+                await collection.update_one(
+                    {"im_ad_id": ad_id},
+                    {"$set": {"im_status": "False"}}
+                )
+                
+                stats['marked_inactive'] += 1
                 return
             
             if not raw_doc.get("listing_status", False):
@@ -120,9 +127,9 @@ async def migrate():
     stats = {
         'updated_relative': 0,
         'updated_autoscout': 0,
-        'skipped_no_raw': 0,
         'skipped_inactive_raw': 0,
         'skipped_no_migration': 0,
+        'marked_inactive': 0,
         'errors': 0
     }
     
@@ -143,7 +150,7 @@ async def migrate():
             if len(batch_tasks) >= CONCURRENT_BATCHES:
                 await asyncio.gather(*batch_tasks)
                 processed = stats['updated_relative'] + stats['updated_autoscout']
-                logger.info(f"Progress: {processed}/{total} - {stats['updated_relative']} relative, {stats['updated_autoscout']} autoscout")
+                logger.info(f"Progress: {processed}/{total} - {stats['updated_relative']} relative, {stats['updated_autoscout']} autoscout, {stats['marked_inactive']} marked inactive")
                 batch_tasks = []
     
     # Process remaining records
@@ -152,12 +159,12 @@ async def migrate():
     if batch_tasks:
         await asyncio.gather(*batch_tasks)
     
-    logger.info(f"Migration complete:")
+    logger.info("Migration complete:")
     logger.info(f"  Updated (relative): {stats['updated_relative']}")
     logger.info(f"  Updated (autoscout): {stats['updated_autoscout']}")
     logger.info(f"  Skipped (no migration needed): {stats['skipped_no_migration']}")
-    logger.info(f"  Skipped (no raw): {stats['skipped_no_raw']}")
     logger.info(f"  Skipped (inactive raw): {stats['skipped_inactive_raw']}")
+    logger.info(f"  Marked inactive (no raw): {stats['marked_inactive']}")
     logger.info(f"  Errors: {stats['errors']}")
     
     client.close()
