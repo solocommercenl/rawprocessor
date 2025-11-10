@@ -1,4 +1,4 @@
-# migrate_images_kooymanimport.py
+# migrate_images_autobedrijfkooyman.py
 # One-time migration: Convert image paths to full CDN URLs
 # Handles both relative paths and AutoScout URLs with batch processing
 
@@ -8,8 +8,8 @@ from loguru import logger
 
 MONGO_URI = "mongodb://10.0.0.21:27017"
 DB_NAME = "autodex"
-SITE_URL = "kooymanimport.nl"
-PROCESSED_COLLECTION = "processed_kooymanimport"
+SITE_URL = "autobedrijfkooyman.nl"
+PROCESSED_COLLECTION = "processed_autobedrijfkooyman"
 BATCH_SIZE = 500
 CONCURRENT_BATCHES = 10
 
@@ -101,13 +101,14 @@ async def migrate():
     client = AsyncIOMotorClient(MONGO_URI)
     db = client[DB_NAME]
     
-    # Get CDN URL from site_settings
+    # Get CDN URL from site_settings (note: field has space in your settings)
     site_doc = await db.site_settings.find_one({"site_url": SITE_URL})
     if not site_doc:
         logger.error(f"Site settings not found for {SITE_URL}")
         return
     
-    cdn_url = site_doc.get("cdn_url")
+    # Try both with and without space
+    cdn_url = site_doc.get("cdn_url") or site_doc.get(" cdn_url")
     if not cdn_url:
         logger.error(f"cdn_url not set in site_settings for {SITE_URL}")
         return
