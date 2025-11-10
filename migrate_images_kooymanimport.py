@@ -1,4 +1,4 @@
-# migrate_images_autobedrijfkooyman.py
+# migrate_images_texbijl.py
 # One-time migration: Convert image paths to full CDN URLs
 # Handles both relative paths and AutoScout URLs with batch processing
 
@@ -8,8 +8,8 @@ from loguru import logger
 
 MONGO_URI = "mongodb://10.0.0.21:27017"
 DB_NAME = "autodex"
-SITE_URL = "autobedrijfkooyman.nl"
-PROCESSED_COLLECTION = "processed_autobedrijfkooyman"
+SITE_URL = "texbijl.nl"
+PROCESSED_COLLECTION = "processed_texbijl"
 BATCH_SIZE = 500
 CONCURRENT_BATCHES = 10
 
